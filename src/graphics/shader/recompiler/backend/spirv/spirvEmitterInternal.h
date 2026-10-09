@@ -126,6 +126,7 @@ struct EmitterState {
 	bool                                             ds_writes_lds           = false;
 	// The device returns zero for out-of-bounds storage buffer reads (robustBufferAccess2).
 	bool                                             robust_buffer_access2   = false;
+	bool                                            packed_wave32 = false;
 	std::array<BufferDefinition, 4>                  storage_buffers {};
 	std::vector<uint32_t>                           memory_byte_offsets;
 	uint32_t                                         bda_pagetable_variable  = 0;
@@ -327,6 +328,8 @@ uint32_t OutputVariableForExport(const EmitterState& state, const IR::ExportInfo
 uint32_t ConstantU32(EmitterState& state, uint32_t value);
 
 uint32_t EmitSubgroupLocalInvocationId(EmitterState& state);
+uint32_t EmitPhysicalSubgroupLane(EmitterState& state, uint32_t lane);
+uint32_t EmitGuestBallot(EmitterState& state, uint32_t ballot);
 
 [[noreturn]] void ExitDescriptorBindingFailure(const EmitterState&       state,
                                                IR::DescriptorBindingKind kind, uint32_t resource,

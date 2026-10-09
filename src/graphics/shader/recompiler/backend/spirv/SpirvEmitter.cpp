@@ -258,6 +258,8 @@ std::vector<uint32_t> EmitProgram(IR::Program& program, ShaderStageInputInfo inp
 	}
 	state.robust_buffer_access2 = robust_buffer_access2;
 	const auto* workgroup = ShaderWorkgroupInput(program.stage, input_info);
+	state.packed_wave32 =
+	    workgroup != nullptr && program.wave_size == 32u && workgroup->host_subgroup_size == 64u;
 	const bool narrow_host =
 	    workgroup != nullptr && program.wave_size == 64u && workgroup->host_subgroup_size == 32u;
 	// Split waves need the workgroup to be one whole wave: their barriers synchronize the
