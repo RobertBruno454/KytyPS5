@@ -179,6 +179,22 @@ uint32_t EmitGuestBallot(EmitterState& state, uint32_t ballot) {
 	return result;
 }
 
+uint32_t EmitSubgroupSize(EmitterState& state) {
+	if (state.subgroup_size_variable == 0) {
+		const auto variable = DefineInterfaceVariable(state, TypeU32(state), spv::StorageClassInput,
+		                                              "gl_SubgroupSize");
+		state.builder.AddAnnotation(spv::OpDecorate, variable, spv::DecorationBuiltIn,
+		                            spv::BuiltInSubgroupSize);
+		if (state.program.stage == ShaderType::Pixel) {
+			state.builder.AddAnnotation(spv::OpDecorate, variable, spv::DecorationFlat);
+		}
+		state.subgroup_size_variable = variable;
+	}
+	const auto value = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpLoad, TypeU32(state), value, state.subgroup_size_variable);
+	return value;
+}
+
 uint32_t InputVariableForKind(const EmitterState& state, IR::StageInputKind kind) {
 	for (const auto& input: state.inputs) {
 		if (input.kind == kind) {

@@ -141,6 +141,7 @@ struct EmitterState {
 	const IR::Block*           current_block                         = nullptr;
 	uint32_t                   pixel_valid_mask_variable             = 0;
 	uint32_t                   subgroup_local_invocation_id_variable = 0;
+	uint32_t                   subgroup_size_variable                = 0;
 	uint32_t                   per_vertex_variable                   = 0;
 	uint32_t                   point_size_variable                   = 0;
 	uint32_t                   clip_distance_variable                = 0;
@@ -301,6 +302,7 @@ uint32_t ConstantU32(EmitterState& state, uint32_t value);
 uint32_t EmitSubgroupLocalInvocationId(EmitterState& state);
 uint32_t EmitPhysicalSubgroupLane(EmitterState& state, uint32_t lane);
 uint32_t EmitGuestBallot(EmitterState& state, uint32_t ballot);
+uint32_t EmitSubgroupSize(EmitterState& state);
 
 [[noreturn]] void ExitDescriptorBindingFailure(const EmitterState&       state,
                                                IR::DescriptorBindingKind kind, uint32_t resource,
