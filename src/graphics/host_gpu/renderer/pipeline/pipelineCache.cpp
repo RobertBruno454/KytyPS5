@@ -25,17 +25,65 @@
 #include <atomic>
 #include <cctype>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fmt/format.h>
 #include <limits>
 #include <span>
 #include <spirv-tools/libspirv.hpp>
+#include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
 #include <xxhash.h>
 
 namespace Libs::Graphics {
+
+namespace {
+
+std::vector<uint64_t> ParseShaderHashList(const char* name) {
+	std::vector<uint64_t> hashes;
+	const char*           value = std::getenv(name);
+	if (value == nullptr) {
+		return hashes;
+	}
+	const std::string text(value);
+	size_t            pos = 0;
+	while (pos <= text.size()) {
+		auto end = text.find_first_of(",; ", pos);
+		if (end == std::string::npos) {
+			end = text.size();
+		}
+		auto token = text.substr(pos, end - pos);
+		if (token.size() > 2 && token[0] == '0' && (token[1] == 'x' || token[1] == 'X')) {
+			token = token.substr(2);
+		}
+		if (!token.empty()) {
+			char*      parse_end = nullptr;
+			const auto hash      = std::strtoull(token.c_str(), &parse_end, 16);
+			if (parse_end != nullptr && *parse_end == '\0') {
+				hashes.push_back(hash);
+			}
+		}
+		pos = end + 1;
+	}
+	for (const auto hash: hashes) {
+		Log::WriteToConsoleAndLog(fmt::format("{}: listed shader 0x{:016x}\n", name, hash));
+	}
+	return hashes;
+}
+
+} // namespace
+
+bool ComputeShaderSkipRequested(uint64_t hash) {
+	static const auto list = ParseShaderHashList("KYTY_SKIP_CS");
+	return !list.empty() && std::find(list.begin(), list.end(), hash) != list.end();
+}
+
+bool ShaderDumpRequested(uint64_t hash) {
+	static const auto list = ParseShaderHashList("KYTY_DUMP_SHADER");
+	return !list.empty() && std::find(list.begin(), list.end(), hash) != list.end();
+}
 
 namespace {
 
@@ -406,7 +454,8 @@ struct PipelineCache::ProgramCache {
 		options.shader_hash = params.hash;
 		options.user_data   = user_data;
 		options.back_code      = params.back_code;
-		options.dump_ir     = Config::GetShaderLogDirection() != Config::LogDirection::Silent;
+		options.dump_ir     = Config::GetShaderLogDirection() != Config::LogDirection::Silent ||
+		                  ShaderDumpRequested(params.hash);
 		options.early_dump  = options.dump_ir;
 		options.emit_debug_info = Config::GraphicsDebugDumpEnabled();
 		options.dump_label  = label;
@@ -806,6 +855,7 @@ ShaderProgram PipelineCache::GetComputeProgram(const HW::ComputeShaderInfo& regs
                                                ShaderComputeInputInfo&      input_info) {
 	input_info.host_subgroup_size = m_graphics.SupportsComputeWave64() ? 64u : 32u;
 	const auto        params      = PrepareProgram(regs, sh, input_info);
+	m_last_compute_hash           = params.hash;
 	input_info.lds_storage = input_info.lds_size_dwords * 4u >
 	    m_graphics.GetPhysicalDeviceProperties().limits.maxComputeSharedMemorySize;
 	uint32_t          push_data_cursor = 0;

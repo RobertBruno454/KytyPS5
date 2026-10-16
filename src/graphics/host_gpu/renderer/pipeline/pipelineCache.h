@@ -135,6 +135,8 @@ public:
 	ShaderProgram GetComputeProgram(const HW::ComputeShaderInfo& regs,
 	                                const HW::ShaderRegisters&   sh,
 	                                ShaderComputeInputInfo&      input_info);
+	// Hash of the program returned by the last GetComputeProgram call (diagnostics).
+	[[nodiscard]] uint64_t LastComputeHash() const noexcept { return m_last_compute_hash; }
 
 	Pipeline& GetGraphicsPipeline(std::span<const RenderColorInfo>       colors,
 	                              const RenderDepthInfo&                 depth,
@@ -147,6 +149,7 @@ public:
 	                             const ShaderProgram&          compute_program);
 
 private:
+	uint64_t m_last_compute_hash = 0;
 	struct ProgramCache;
 
 	struct GraphicsPipelineKey {
@@ -200,6 +203,12 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& pipeline,
                             const ShaderComputeInputInfo& input_info,
                             vk::ShaderModule compute_module, vk::PipelineCache driver_cache);
+
+// Test switches read from the environment (comma-separated hex hashes):
+// KYTY_SKIP_CS lists compute shaders whose dispatches are dropped;
+// KYTY_DUMP_SHADER lists shaders whose RDNA disassembly and IR go to the log.
+[[nodiscard]] bool ComputeShaderSkipRequested(uint64_t hash);
+[[nodiscard]] bool ShaderDumpRequested(uint64_t hash);
 
 } // namespace Libs::Graphics
 
