@@ -126,6 +126,27 @@ void TestLongAndUnterminatedOutput(bool enabled) {
 	      "forwarding truncated long output or changed its line endings");
 }
 
+void TestEmbeddedNullOutput(bool enabled) {
+	constexpr char format[] = "%c%c%c";
+	for (const auto& text: {std::string("\0ab", 3), std::string("a\0b", 3), std::string("ab\0", 3)}) {
+		Libs::VaContext context;
+		InitializeContext(context);
+		context.reg_save_area.gp[0] = reinterpret_cast<uintptr_t>(format);
+		for (size_t i = 0; i < text.size(); i++) {
+			context.reg_save_area.gp[i + 1] = static_cast<unsigned char>(text[i]);
+		}
+		StderrCapture capture;
+		Check(Libs::GetGuestPrintfCtxFunc()(&context) == 3,
+		      "printf count excluded an embedded null byte");
+		context.va_list.gp_offset = sizeof(uint64_t);
+		Check(Libs::GetGuestVprintfFunc()(format, &context.va_list) == 3,
+		      "vprintf count excluded an embedded null byte");
+		const auto expected = std::string("GUEST_STDOUT: ") + text;
+		Check(capture.Read() == (enabled ? expected + expected : ""),
+		      "forwarding dropped an embedded null byte or the bytes after it");
+	}
+}
+
 void TestSnprintfDoesNotPrint() {
 	std::array<char, 64> buffer {};
 	constexpr char format[] = "buffer-only %d";
@@ -157,6 +178,7 @@ int main(int argc, char** argv) {
 	Check(Log::IsSilent(), "test requires the normal logger to be silent");
 	TestPrintedDiagnostics(mode == "enabled");
 	TestLongAndUnterminatedOutput(mode == "enabled");
+	TestEmbeddedNullOutput(mode == "enabled");
 	TestSnprintfDoesNotPrint();
 	Log::Shutdown();
 	Config::Shutdown();

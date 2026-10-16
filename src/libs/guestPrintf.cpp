@@ -19,6 +19,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 #include <vector>
 
 namespace Libs {
@@ -785,7 +786,9 @@ static int kyty_printf_internal(bool sn, char* sn_s, size_t sn_n, const char* fo
 			return value != nullptr && std::strcmp(value, "1") == 0;
 		}();
 		if (forward_to_stderr) {
-			std::fprintf(stderr, "GUEST_STDOUT: %s", buffer.data());
+			std::string message("GUEST_STDOUT: ");
+			message.append(buffer.data(), idx);
+			std::fwrite(message.data(), 1, message.size(), stderr);
 			std::fflush(stderr);
 		}
 	}
