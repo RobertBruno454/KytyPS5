@@ -848,7 +848,8 @@ void AppendInputKey(ByteWriter& key, const ShaderPixelInputInfo& info) {
 		key.Put(mapping.packed);
 	}
 	for (const bool flag: {info.ps_pos_x, info.ps_pos_y, info.ps_pos_z, info.ps_pos_w,
-	                       info.ps_front_face, info.ps_ancillary, info.ps_no_perspective,
+	                       info.ps_front_face, info.ps_front_face_all_bits, info.ps_ancillary,
+	                       info.ps_no_perspective,
 	                       info.ps_pixel_kill_enable, info.ps_depth_export_enable,
 	                       info.ps_sample_mask_export_enable, info.ps_sample_shading,
 	                       info.dual_source_blending, info.ps_early_z, info.ps_execute_on_noop}) {
