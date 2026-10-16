@@ -1816,6 +1816,14 @@ KYTY_SYSV_ABI int VideoOutGetOutputStatus(int handle, VideoOutOutputStatus* stat
 	             ((attribute3 & 4) != 0 && ctx->width < 3840 && ctx->height < 2160)
 	         ? 1u
 	         : 2u);
+	{
+		static std::atomic_bool logged {false};
+		if (!logged.exchange(true, std::memory_order_relaxed)) {
+			Log::WriteToConsoleAndLog(fmt::format(
+			    "VideoOut: game queried the output status; reporting resolution {} ({})\n",
+			    status->resolution, status->resolution == 1u ? "1080p" : "4K"));
+		}
+	}
 	status->dynamicRange = hdr_allowed && DriverState().IsHdrSupported() ? 2u : 1u;
 	status->refreshRate =
 	    (ctx->output_mode == VIDEO_OUT_OUTPUT_MODE_119_88HZ || Config::GetVblankFrequency() >= 119

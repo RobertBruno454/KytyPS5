@@ -23,6 +23,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <deque>
 #include <memory>
@@ -31,12 +32,145 @@
 #include <thread>
 #include <vector>
 
+#include <fmt/format.h>
+
 namespace Libs::Graphics {
 
 static thread_local CommandProcessor* g_current_processor = nullptr;
 static thread_local Pm4Execution*     g_current_execution = nullptr;
 static thread_local bool              g_gpu_thread        = false;
 static thread_local GuestGpu*         g_gpu_state         = nullptr;
+
+// Stall diagnostics (log only). A guest wait that never releases, or a GPU thread stuck
+// inside one submission, otherwise shows up only as a black screen with a silent log.
+namespace {
+namespace StallWatch {
+
+using Clock = std::chrono::steady_clock;
+
+int64_t NowMs() {
+	return std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now().time_since_epoch())
+	    .count();
+}
+
+constexpr int64_t  WaitReportMs  = 3000;
+constexpr int64_t  BusyReportMs  = 5000;
+constexpr uint32_t MaxReports    = 64;
+std::atomic<uint32_t> g_reports {0};
+
+bool TakeReport() {
+	return g_reports.fetch_add(1, std::memory_order_relaxed) < MaxReports;
+}
+
+struct WaitState {
+	const void* addr     = nullptr;
+	uint64_t    ref      = 0;
+	uint64_t    mask     = 0;
+	uint32_t    func     = 0;
+	int64_t     since_ms = 0;
+	bool        reported = false;
+};
+thread_local WaitState g_wait;
+
+void OnWaitBlocked(const void* addr, uint64_t value, uint64_t ref, uint64_t mask, uint32_t func,
+                   unsigned bits) {
+	const auto now = NowMs();
+	if (g_wait.addr != addr || g_wait.ref != ref || g_wait.mask != mask || g_wait.func != func) {
+		g_wait = {addr, ref, mask, func, now, false};
+		return;
+	}
+	if (!g_wait.reported && now - g_wait.since_ms >= WaitReportMs && TakeReport()) {
+		g_wait.reported = true;
+		Log::WriteToConsoleAndLog(fmt::format(
+		    "GPU stall: WAIT_REG_MEM{} blocked {} ms: addr=0x{:016x} value=0x{:x} ref=0x{:x} "
+		    "mask=0x{:x} func={}\n",
+		    bits, now - g_wait.since_ms, reinterpret_cast<uint64_t>(addr), value, ref, mask, func));
+	}
+}
+
+void OnWaitReleased(const void* addr) {
+	if (g_wait.addr == addr) {
+		if (g_wait.reported) {
+			Log::WriteToConsoleAndLog(
+			    fmt::format("GPU stall: WAIT_REG_MEM at 0x{:016x} released after {} ms\n",
+			                reinterpret_cast<uint64_t>(addr), NowMs() - g_wait.since_ms));
+		}
+		g_wait = {};
+	}
+}
+
+std::atomic<int64_t>  g_busy_since_ms {0};
+std::atomic<uint32_t> g_busy_queue {0};
+std::atomic<uint32_t> g_busy_type {0};
+std::atomic<int64_t>  g_busy_reported_for {0};
+std::atomic<int64_t>  g_blocked_since_ms[64] {}; // 1 graphics + 56 compute queues
+std::atomic<bool>     g_watchdog_started {false};
+
+void StartWatchdog() {
+	if (g_watchdog_started.exchange(true)) {
+		return;
+	}
+	std::thread([] {
+		for (;;) {
+			std::this_thread::sleep_for(std::chrono::seconds(1));
+			const auto since = g_busy_since_ms.load(std::memory_order_acquire);
+			if (since == 0 || g_busy_reported_for.load(std::memory_order_relaxed) == since) {
+				continue;
+			}
+			const auto elapsed = NowMs() - since;
+			if (elapsed >= BusyReportMs && TakeReport()) {
+				g_busy_reported_for.store(since, std::memory_order_relaxed);
+				Log::WriteToConsoleAndLog(fmt::format(
+				    "GPU stall: GPU thread inside one submission for {} ms (queue={} type={}); "
+				    "likely a host wait or deadlock, not a guest wait\n",
+				    elapsed, g_busy_queue.load(), g_busy_type.load()));
+			}
+		}
+	}).detach();
+}
+
+void BeginBusy(uint32_t queue, uint32_t type) {
+	g_busy_queue.store(queue, std::memory_order_relaxed);
+	g_busy_type.store(type, std::memory_order_relaxed);
+	g_busy_since_ms.store(NowMs(), std::memory_order_release);
+}
+
+void EndBusy() {
+	const auto since = g_busy_since_ms.exchange(0, std::memory_order_acq_rel);
+	if (since != 0 && g_busy_reported_for.load(std::memory_order_relaxed) == since) {
+		Log::WriteToConsoleAndLog(
+		    fmt::format("GPU stall: GPU thread left the submission after {} ms\n", NowMs() - since));
+	}
+}
+
+void OnSubmissionResult(uint32_t queue, bool complete) {
+	if (queue >= std::size(g_blocked_since_ms)) {
+		return;
+	}
+	auto& slot = g_blocked_since_ms[queue];
+	if (complete) {
+		const auto since = slot.exchange(0, std::memory_order_relaxed);
+		if (since < 0) {
+			Log::WriteToConsoleAndLog(fmt::format(
+			    "GPU stall: queue {} unblocked after {} ms\n", queue, NowMs() + since));
+		}
+		return;
+	}
+	const auto now   = NowMs();
+	auto       since = slot.load(std::memory_order_relaxed);
+	if (since == 0) {
+		slot.store(now, std::memory_order_relaxed);
+	} else if (since > 0 && now - since >= BusyReportMs && TakeReport()) {
+		// Negative marks "reported"; keeps the start time for the release message.
+		slot.store(-since, std::memory_order_relaxed);
+		Log::WriteToConsoleAndLog(fmt::format(
+		    "GPU stall: queue {} submission blocked for {} ms (guest wait not satisfied)\n",
+		    queue, now - since));
+	}
+}
+
+} // namespace StallWatch
+} // namespace
 
 struct DrawIndirectArgs {
 	uint32_t vertex_count_per_instance;
@@ -315,8 +449,13 @@ void CommandProcessor::WaitRegMem(uint32_t func, const T* addr, T ref, T mask, u
 	}
 
 	(void)poll;
-	if (!TestWaitRegMemValue(*addr, ref, mask, func)) {
+	const T value = *addr;
+	if (!TestWaitRegMemValue(value, ref, mask, func)) {
+		StallWatch::OnWaitBlocked(addr, value, ref, mask, func,
+		                          static_cast<unsigned>(sizeof(T) * 8u));
 		SuspendPm4();
+	} else {
+		StallWatch::OnWaitReleased(addr);
 	}
 }
 
@@ -445,6 +584,7 @@ void GuestGpu::ThreadRun(void* data) {
 	KYTY_PROFILER_THREAD("Thread_Gpu");
 	g_gpu_thread = true;
 	g_gpu_state  = gpu;
+	StallWatch::StartWatchdog();
 
 	for (;;) {
 		Submission                   submission;
@@ -504,7 +644,9 @@ void GuestGpu::ThreadRun(void* data) {
 
 		if (command) {
 			EXIT_IF(g_current_processor != nullptr);
+			StallWatch::BeginBusy(QueueCount, 99);
 			command();
+			StallWatch::EndBusy();
 
 			Common::LockGuard lock(gpu->m_queue_mutex);
 			gpu->m_processing = false;
@@ -515,7 +657,10 @@ void GuestGpu::ThreadRun(void* data) {
 		}
 
 		EXIT_IF(!has_submission);
+		StallWatch::BeginBusy(submission.queue_id, static_cast<uint32_t>(submission.type));
 		const bool complete = gpu->Process(submission);
+		StallWatch::EndBusy();
+		StallWatch::OnSubmissionResult(submission.queue_id, complete);
 
 		Common::LockGuard lock(gpu->m_queue_mutex);
 		if (!complete) {
