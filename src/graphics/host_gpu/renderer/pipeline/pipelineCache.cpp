@@ -29,6 +29,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <fmt/format.h>
@@ -1857,11 +1858,26 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
 	return result;
 }
 
+// KYTY_COMPUTE_WAVE64_SPLIT=1 runs wave64 compute programs as two 32-lane halves, the path
+// 32-wide hosts (NVIDIA) take, instead of natively on a 64-lane subgroup (AMD).
+static bool ComputeWave64SplitForced() {
+	static const bool forced = [] {
+		const char* value = std::getenv("KYTY_COMPUTE_WAVE64_SPLIT");
+		const bool  on    = value != nullptr && value[0] != '\0' && std::strcmp(value, "0") != 0;
+		if (on) {
+			LOGF("KYTY_COMPUTE_WAVE64_SPLIT: wave64 compute programs run as two 32-lane halves\n");
+		}
+		return on;
+	}();
+	return forced;
+}
+
 ShaderProgram PipelineCache::GetComputeProgram(const HW::ComputeShaderInfo& regs,
                                                const HW::ShaderRegisters&   sh,
                                                ShaderComputeInputInfo&      input_info,
                                                ProgramResolution*           ahead) {
-	input_info.host_subgroup_size = m_graphics.SupportsComputeWave64() ? 64u : 32u;
+	input_info.host_subgroup_size =
+	    m_graphics.SupportsComputeWave64() && !ComputeWave64SplitForced() ? 64u : 32u;
 	const auto        params      = PrepareProgram(regs, sh, input_info);
 	input_info.lds_storage = input_info.lds_size_dwords * 4u >
 	    m_graphics.GetPhysicalDeviceProperties().limits.maxComputeSharedMemorySize;

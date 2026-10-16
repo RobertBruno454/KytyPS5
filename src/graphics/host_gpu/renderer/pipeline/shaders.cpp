@@ -598,7 +598,10 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 	comp_shader_stage_info.module = compute_module;
 	comp_shader_stage_info.pName  = "main";
 	EXIT_IF(!input_info.stage);
-	const auto wave_size = input_info.stage.program->wave_size;
+	// A wave64 program translated for a 32-lane host (two halves per invocation) needs a 32-lane
+	// subgroup, so the host size bounds the required size.
+	const auto wave_size =
+	    std::min(input_info.stage.program->wave_size, input_info.host_subgroup_size);
 	if (graphics.compute_subgroup_size_control_enabled &&
 	    wave_size >= graphics.min_subgroup_size && wave_size <= graphics.max_subgroup_size) {
 		comp_subgroup_size.requiredSubgroupSize = wave_size;
