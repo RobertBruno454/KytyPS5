@@ -16,6 +16,9 @@
 
 #include <cfloat>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <vector>
 
 namespace Libs {
@@ -702,18 +705,18 @@ static int kyty_printf_internal(bool sn, char* sn_s, size_t sn_n, const char* fo
 
 			case 's': {
 				const size_t limit = (flags & FLAGS_PRECISION) != 0u ? precision : maxlen;
-				const char* p = VaArg_ptr<const char>(va_list);
-				std::string converted;
+				const char*  p     = VaArg_ptr<const char>(va_list);
+				std::string  converted;
 				if ((flags & FLAGS_LONG) != 0u) {
 					// The guest ABI uses a 16-bit code unit for wchar_t.
-					const auto* wide = reinterpret_cast<const char16_t*>(p);
+					const auto*         wide = reinterpret_cast<const char16_t*>(p);
 					std::u16string_view text(wide, _strnlen_s(wide, limit));
-					if (text.size() == limit && !text.empty() &&
-					    text.back() >= 0xd800 && text.back() <= 0xdbff) {
+					if (text.size() == limit && !text.empty() && text.back() >= 0xd800 &&
+					    text.back() <= 0xdbff) {
 						text.remove_suffix(1);
 					}
 					converted = Common::Utf16ToUtf8(text);
-					p = converted.c_str();
+					p         = converted.c_str();
 				}
 				size_t length = _strnlen_s(p, limit);
 				if ((flags & FLAGS_LONG) != 0u && length < converted.size()) {
@@ -777,6 +780,14 @@ static int kyty_printf_internal(bool sn, char* sn_s, size_t sn_n, const char* fo
 		EXIT_NOT_IMPLEMENTED(static_cast<size_t>(s) >= sn_n);
 	} else {
 		LOGF_COLOR(Log::Color::BrightMagenta, "%s", buffer.data());
+		static const bool forward_to_stderr = [] {
+			const char* value = std::getenv("KYTY_GUEST_STDOUT");
+			return value != nullptr && std::strcmp(value, "1") == 0;
+		}();
+		if (forward_to_stderr) {
+			std::fprintf(stderr, "GUEST_STDOUT: %s", buffer.data());
+			std::fflush(stderr);
+		}
 	}
 
 	// return written chars without terminating \0
