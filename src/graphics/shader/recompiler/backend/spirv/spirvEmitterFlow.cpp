@@ -747,6 +747,20 @@ uint32_t EmitConditionRef(ValueEmitContext& ctx, const IR::Inst& inst) {
 	if (ctx.other_half != nullptr) {
 		predicate = Binary(ctx.state, zero ? spv::OpLogicalAnd : spv::OpLogicalOr,
 		                   TypeBool(ctx.state), predicate, ctx.HalfArg(inst, 0, 1));
+	} else if (ctx.state.packed_wave32) {
+		// Two guest wave32 waves share the 64-lane host subgroup: vote within this wave's ballot
+		// word. All: no active lane of the wave votes false. Any: some active lane votes true.
+		auto&      state = ctx.state;
+		const auto voted =
+		    zero ? Unary(state, spv::OpLogicalNot, TypeBool(state), predicate) : predicate;
+		const auto host_ballot = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpGroupNonUniformBallot, TypeU32Vector(state, 4),
+		                          host_ballot, ConstantU32(state, spv::ScopeSubgroup), voted);
+		const auto word = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpCompositeExtract, TypeU32(state), word,
+		                          EmitGuestBallot(state, host_ballot), 0);
+		return Binary(state, zero ? spv::OpIEqual : spv::OpINotEqual, TypeBool(state), word,
+		              ConstantU32(state, 0));
 	}
 	const auto result = ctx.state.builder.AllocateId();
 	ctx.state.builder.AddFunction(zero ? spv::OpGroupNonUniformAll : spv::OpGroupNonUniformAny,
