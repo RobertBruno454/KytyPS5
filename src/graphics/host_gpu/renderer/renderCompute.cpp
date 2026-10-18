@@ -1,5 +1,6 @@
 #include "common/assert.h"
 #include "common/common.h"
+#include "common/debugCounters.h"
 #include "common/emulatorConfig.h"
 #include "common/file.h"
 #include "common/logging/log.h"
@@ -95,9 +96,10 @@ bool ResolveComputeBufferFill(const ShaderComputeInputInfo& input, uint32_t grou
 	constexpr std::array formats {
 	    Prospero::BufferFormat::k32UInt, Prospero::BufferFormat::k32_32UInt,
 	    Prospero::BufferFormat::k32_32_32UInt, Prospero::BufferFormat::k32_32_32_32UInt};
+	// Offset-or-swizzle bounds do not describe the element range proved by the shader.
 	if (descriptor.Stride() != element_size || descriptor.Format() != formats[fill.words - 1] ||
 	    descriptor.SwizzleEnabled() || descriptor.IndexStride() != 0 || descriptor.AddTid() ||
-	    descriptor.Base48() == 0) {
+	    descriptor.OutOfBounds() == 3 || descriptor.Base48() == 0) {
 		return false;
 	}
 	if (input.threads_num[0] == 0 || input.threads_num[0] != fill.group_stride[0] ||
@@ -109,7 +111,11 @@ bool ResolveComputeBufferFill(const ShaderComputeInputInfo& input, uint32_t grou
 	                                 ? group_x
 	                                 : static_cast<uint64_t>(group_x) * input.threads_num[0];
 	const auto     size        = descriptor.GetSize();
-	if (invocations != descriptor.NumRecords() || size == 0 || size > UINT32_MAX ||
+	const auto elements = descriptor.NumRecords();
+	const bool covered = fill.bounded_elements != 0
+	                         ? fill.bounded_elements == elements && invocations >= elements
+	                         : invocations == elements;
+	if (!covered || invocations > uint64_t {UINT32_MAX} + 1 || size == 0 || size > UINT32_MAX ||
 	    (input.dispatch_thread_dimensions &&
 	     (group_x % input.threads_num[0] != 0 || input.dispatch_threads_num[0] != group_x ||
 	      input.dispatch_threads_num[1] != 1 || input.dispatch_threads_num[2] != 1))) {
@@ -123,9 +129,9 @@ bool ResolveComputeBufferFill(const ShaderComputeInputInfo& input, uint32_t grou
 	return true;
 }
 
-bool RenderExecutor::TryConsumeComputeImageClear(const ShaderComputeInputInfo& input,
-                                                CommandBuffer& command, uint32_t group_x,
-                                                uint32_t group_y, uint32_t group_z, uint32_t mode) {
+bool RenderExecutor::TryConsumeComputeFill(const ShaderComputeInputInfo& input,
+                                          CommandBuffer& command, uint32_t group_x,
+                                          uint32_t group_y, uint32_t group_z, uint32_t mode) {
 	const auto& program   = *input.stage.program;
 	const auto& resources = *input.stage.resources;
 	const auto& fill      = resources.uniform_fill;
@@ -181,14 +187,26 @@ bool RenderExecutor::TryConsumeComputeImageClear(const ShaderComputeInputInfo& i
 	                              size)) {
 		return false;
 	}
-	if (!cache.ClearImageFromBuffer(command, descriptor.Base48(), size, packed_clear)) {
-		return false;
+	const bool image_clear =
+	    cache.ClearImageFromBuffer(command, descriptor.Base48(), size, packed_clear);
+	if (!image_clear) {
+		// CPU fills invalidate overlapping cached images. Preserve the native dispatch for
+		// partial or ambiguous image backings, including pooled metadata aliases.
+		if ((descriptor.Base48() & 3u) != 0 ||
+		    !m_context.IsMapped(descriptor.Base48(), size) ||
+		    cache.IsRegionRegistered(descriptor.Base48(), size)) {
+			return false;
+		}
+		// Metadata need not have an image backing yet. Keep proven fills in guest memory
+		// when CPU-owned, so color-clear discovery can read them without a GPU download.
+		m_context.GetBufferCache().FillBuffer(descriptor.Base48(), size, packed_clear, false);
 	}
 	static std::atomic<uint32_t> logged_clears {0};
 	if (logged_clears.fetch_add(1, std::memory_order_relaxed) < 32) {
-		LOGF("GraphicsRenderDispatchDirect: compute image clear shader=0x%016" PRIx64
+		LOGF("GraphicsRenderDispatchDirect: compute %s shader=0x%016" PRIx64
 		     " addr=0x%016" PRIx64 " size=0x%016" PRIx64 " value=0x%08" PRIx32 "\n",
-		     input.stage.program->shader_hash, descriptor.Base48(), size, packed_clear);
+		     image_clear ? "image clear" : "buffer fill", input.stage.program->shader_hash,
+		     descriptor.Base48(), size, packed_clear);
 	}
 	return true;
 }
@@ -274,10 +292,6 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 		return;
 	}
 
-	if (sh_ctx.GetCs().cs_regs.data_addr == 0) {
-		return;
-	}
-
 	constexpr uint32_t DISPATCH_INITIATOR_USE_THREAD_DIMENSIONS = 1u << 5u;
 	constexpr uint32_t DISPATCH_INITIATOR_BASE_BITS             = 0x41u;
 	constexpr uint32_t DISPATCH_INITIATOR_MODIFIER_BITS         = 0xa038u;
@@ -333,8 +347,8 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 	if (resources.specialization_reads.empty()) {
 		// Cached metadata addresses can be reused as ordinary buffers; preserve their guest writes.
 		UpdateComputeMetaClears(input_info, buffer);
-		if (TryConsumeComputeImageClear(input_info, buffer, thread_group_x, thread_group_y,
-		                               thread_group_z, mode)) {
+		if (TryConsumeComputeFill(input_info, buffer, thread_group_x, thread_group_y,
+		                          thread_group_z, mode)) {
 			ResetBindings();
 			return;
 		}
@@ -458,6 +472,7 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 
 	vk_buffer.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline.pipeline);
 	vk_buffer.dispatch(thread_group_x, thread_group_y, thread_group_z);
+	Common::DebugCounters::Add(Common::DebugCounters::Counter::Dispatches);
 
 	// The removed host fence also ordered read-only dispatches before later writers.
 	ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
@@ -531,6 +546,7 @@ void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
 	                          1, &barrier, 0, nullptr, 0, nullptr);
 	vk_buffer.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline.pipeline);
 	vk_buffer.dispatchIndirect(args_buffer->Handle(), args_offset);
+	Common::DebugCounters::Add(Common::DebugCounters::Counter::Dispatches);
 	ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
 	ResetBindings();
 }
