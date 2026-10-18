@@ -882,6 +882,14 @@ uint32_t EmitSubgroupReduceU32(ValueEmitContext& ctx, const IR::Inst& inst) {
 		value = combine(state, ctx.HalfArg(inst, 0, 0), ctx.HalfArg(inst, 0, 1));
 	}
 	const auto result = state.builder.AllocateId();
+	if (state.packed_wave32) {
+		// Two guest wave32s share one 64-lane host subgroup: reduce each 32-lane cluster so
+		// one wave's result never mixes in the other wave's lanes.
+		state.builder.AddFunction(op, TypeU32(state), result,
+		                          ConstantU32(state, spv::ScopeSubgroup),
+		                          spv::GroupOperationClusteredReduce, value, ConstantU32(state, 32));
+		return result;
+	}
 	state.builder.AddFunction(op, TypeU32(state), result, ConstantU32(state, spv::ScopeSubgroup),
 	                          spv::GroupOperationReduce, value);
 	return result;

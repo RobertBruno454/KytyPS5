@@ -796,6 +796,9 @@ void DefineModule(EmitterState& state) {
 	}
 	if (state.program.info.subgroup_arithmetic) {
 		state.builder.RequireCapability(spv::CapabilityGroupNonUniformArithmetic);
+		if (state.packed_wave32) {
+			state.builder.RequireCapability(spv::CapabilityGroupNonUniformClustered);
+		}
 	}
 	if (state.program.info.compute_derivatives && state.program.stage == ShaderType::Compute) {
 		state.builder.RequireCapability(spv::CapabilityComputeDerivativeGroupQuadsKHR);
