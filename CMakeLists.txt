@@ -453,6 +453,12 @@ add_executable(bit_array_tests EXCLUDE_FROM_ALL
 )
 target_include_directories(bit_array_tests PRIVATE ${inc_headers})
 
+add_executable(polygon_mode_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/PolygonModeTests.cpp"
+)
+target_link_libraries(polygon_mode_tests common Vulkan::Headers fmt::fmt)
+target_include_directories(polygon_mode_tests PRIVATE ${inc_headers})
+
 add_executable(lru_cache_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/LruCacheTests.cpp"
 )
@@ -675,6 +681,7 @@ if(BUILD_TESTING)
 	add_test(NAME guest_printf_invalid COMMAND ${CMAKE_COMMAND} -E env KYTY_GUEST_STDOUT=true
 		$<TARGET_FILE:guest_printf_tests> disabled)
 	add_test(NAME lru_cache COMMAND $<TARGET_FILE:lru_cache_tests>)
+	add_test(NAME polygon_mode COMMAND $<TARGET_FILE:polygon_mode_tests>)
 	add_test(NAME shader_vertex_metadata COMMAND $<TARGET_FILE:shader_vertex_metadata_tests>)
 	add_test(NAME resource_materialization COMMAND $<TARGET_FILE:resource_materialization_tests>)
 	add_test(NAME resource_tracking COMMAND $<TARGET_FILE:resource_tracking_tests>)
@@ -770,6 +777,7 @@ if(BUILD_TESTING)
 		bit_array_tests
 		guest_printf_tests
 		lru_cache_tests
+		polygon_mode_tests
 		shader_vertex_metadata_tests
 		resource_materialization_tests
 		resource_tracking_tests
