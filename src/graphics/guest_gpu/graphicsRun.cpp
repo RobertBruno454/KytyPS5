@@ -829,15 +829,20 @@ void CommandProcessor::WriteData(uint32_t* dst, const uint32_t* src, uint32_t dw
 		if (cache.WriteClean(reinterpret_cast<uint64_t>(dst), &src[dw_num - 1], sizeof(uint32_t))) {
 			return;
 		}
+		auto* output = static_cast<volatile uint32_t*>(dst);
 		for (uint32_t i = 0; i < dw_num; i++) {
-			dst[0] = src[i];
+			*output = src[i];
 		}
 	} else {
 		const auto bytes = static_cast<size_t>(dw_num) * sizeof(uint32_t);
 		if (cache.WriteClean(reinterpret_cast<uint64_t>(dst), src, bytes)) {
 			return;
 		}
-		memcpy(dst, src, bytes);
+		// Completion labels can be reused immediately; memcpy may write a destination twice.
+		auto* output = static_cast<volatile uint32_t*>(dst);
+		for (uint32_t i = 0; i < dw_num; i++) {
+			output[i] = src[i];
+		}
 	}
 }
 
