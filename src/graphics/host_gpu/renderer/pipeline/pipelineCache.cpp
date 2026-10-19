@@ -164,9 +164,16 @@ bool ReadShaderGuestMemory(void*, uint64_t address, std::span<uint32_t> values) 
 }
 
 bool ReadShaderScalarMemory(void*, uint64_t address, std::span<uint32_t> values) {
-	// The walk evaluates loads the shader may never execute, e.g. through a null SRT
-	// table pointer, so unmapped guest memory reads as zeros instead of faulting the host.
-	if (!Libs::LibKernel::Memory::TryReadBacking(address, values.data(), values.size_bytes())) {
+	// Scalar table reads can land on memory an earlier dispatch wrote, so they take the
+	// GPU-synchronized path like specialization reads (#1713). The walk also evaluates loads
+	// the shader may never execute, e.g. through a null SRT table pointer, so unmapped guest
+	// memory reads as zeros instead of faulting the host (#1549).
+	if (values.empty()) {
+		return true;
+	}
+	if (!Libs::LibKernel::Memory::TryReadBufferBacking(address, values.data(),
+	                                                   values.size_bytes()) &&
+	    !Libs::LibKernel::Memory::TryReadBacking(address, values.data(), values.size_bytes())) {
 		std::ranges::fill(values, 0u);
 	}
 	return true;
