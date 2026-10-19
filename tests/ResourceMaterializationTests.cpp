@@ -172,6 +172,26 @@ void TestMappedSrtUsesDirectReaderByDefault() {
         "cache rematerialization did not use the direct reader by default");
 }
 
+void TestNullPageSrtReadsZero() {
+  using namespace Libs::Graphics::ShaderRecompiler::IR;
+  auto plan = ExtractResourcePlan(SrtProgram(0x18u));
+  uint32_t specialization_reads = 0;
+  const SrtRuntime runtime{.userdata = &specialization_reads,
+                           .read_specialization_memory =
+                               RejectSpecializationRead};
+  ResourceSnapshot snapshot;
+  ResourceSpecialization specialization;
+  Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
+            snapshot.flattened_srt == std::vector<uint32_t>{0u},
+        "direct SRT read from a null table pointer did not read zero");
+  // Captured reads go through the ordinary reader instead of the direct one.
+  plan.source_reads = {{0x1000u, 4u}};
+  Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
+            snapshot.flattened_srt == std::vector<uint32_t>{0u} &&
+            snapshot.specialization_reads == plan.source_reads,
+        "captured SRT read from a null table pointer did not read zero untracked");
+}
+
 void TestNativeNestedSrtRefresh() {
   using namespace Libs::Graphics::ShaderRecompiler::IR;
   std::array<uint32_t, 3> first{0u, 0x12345678u, 0xabcdef01u};
@@ -231,6 +251,10 @@ void TestNativeNestedSrtRefresh() {
                   std::vector<uint32_t>{(*data)[1], table[0], table[1], (*data)[2]},
           "native SRT refresh lost pointer masking, alignment, or current values");
   }
+  table = pointer_words(nullptr);
+  Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
+            snapshot.flattened_srt == std::vector<uint32_t>{0u, table[0], table[1], 0u},
+        "native SRT did not read zero through a null nested table");
   Check(!MaterializeResources(plan, {.user_data = std::span(user_data).first(1)},
                               snapshot, specialization),
         "native SRT walk accepted truncated user data");
@@ -269,6 +293,12 @@ void TestNativeNestedSrtRefresh() {
                       : std::array<uint32_t, 2>{0xfffffffcu, 0xffffu};
     Check(!MaterializeResources(bounded, {.user_data = base}, snapshot, specialization),
           "native SRT accepted address underflow or 48-bit overflow");
+    if (offset > 0) {
+      Check(MaterializeResources(bounded, {.user_data = std::array<uint32_t, 2>{0u, 0u}},
+                                 snapshot, specialization) &&
+                snapshot.flattened_srt[0] == 0u,
+            "native SRT did not read zero through a null table pointer");
+    }
   }
   high.Instruction()->SetArg(0, Value(ScalarReg(6)));
   Check(ExtractResourcePlan(program).srt_code == nullptr,
@@ -1014,6 +1044,81 @@ void TestEmptyTraversalSkipsUnmappedDescriptor(bool independent_mask, bool count
         Check(read == std::pair<uint64_t, uint64_t>{0x1000u, 4u},
               "empty traversal proof captured an unrelated memory range");
     }
+  }
+}
+
+void TestBranchOnWrittenBufferNotCaptured(bool unsigned_bound, bool written) {
+  using namespace Libs::Graphics::ShaderRecompiler::IR;
+  using Libs::Graphics::ShaderRecompiler::CFG::TerminatorKind;
+  Program program;
+  program.stage = Libs::Graphics::ShaderType::Compute;
+  program.srt_plan_complete = program.resource_tracking_complete = true;
+  for (uint32_t i = 0; i < 3; ++i) AddValueBlock(program);
+  auto &entry = *program.blocks[0];
+  auto &use = *program.blocks[1];
+  const auto emit = [](Block &block, ValueOpcode opcode, std::initializer_list<Value> args) {
+    return Value(&block.AppendNewInst(opcode, args));
+  };
+  DescriptorSource source;
+  const auto descriptor_address = emit(entry, ValueOpcode::GetAddressResource,
+      {Value(0x2000u), Value(0u)});
+  for (uint32_t i = 0; i < 4; ++i) {
+    const auto index = static_cast<uint32_t>(program.memory_info.size());
+    program.memory_info.push_back({.kind = ResourceKind::ScalarAddress, .planning_only = true});
+    source.dwords[i] = emit(entry, ValueOpcode::LoadAddressU32,
+        {descriptor_address, Value(i * 4u), Value(0u), Value(true)});
+    source.dwords[i].Instruction()->SetFlags(MemoryFlags{.index = index});
+  }
+  source.dword_count = 4;
+  program.descriptor_sources.push_back(source);
+  program.info.buffers.push_back({.source = 0, .read = true, .written = written});
+  const auto buffer_index = static_cast<uint32_t>(program.memory_info.size());
+  program.memory_info.push_back({.kind = ResourceKind::Buffer, .resource = 0});
+  const auto buffer = emit(entry, ValueOpcode::GetBufferResource,
+      {source.dwords[0], source.dwords[1], source.dwords[2], source.dwords[3]});
+  const auto count = emit(entry, ValueOpcode::LoadBufferU32,
+      {buffer, Value(0u), Value(0u), Value(0u), Value(true)});
+  count.Instruction()->SetFlags(MemoryFlags{.index = buffer_index});
+  const auto lane = emit(entry, ValueOpcode::GetBuiltin,
+      {Value(static_cast<uint32_t>(StageInputKind::LocalInvocationId)), Value(0u)});
+  entry.condition = unsigned_bound ? emit(entry, ValueOpcode::ULessThan32, {lane, count})
+                                   : emit(entry, ValueOpcode::INotEqual32, {count, Value(0u)});
+  entry.terminator.kind = TerminatorKind::ConditionalBranch;
+  entry.terminator.true_block = &use;
+  entry.terminator.false_block = program.blocks[2];
+  entry.AddBranch(&use);
+  entry.AddBranch(program.blocks[2]);
+  use.terminator.kind = TerminatorKind::Return;
+  program.blocks[2]->terminator.kind = TerminatorKind::Return;
+  if (written)
+    emit(use, ValueOpcode::StoreBufferU32, {buffer, Value(1u), Value(0u), Value(0u), Value(1u), Value(true)})
+        .Instruction()->SetFlags(MemoryFlags{.index = buffer_index});
+  auto plan = ExtractResourcePlan(program);
+  uint32_t count_value = 0;
+  const auto read = +[](void *data, uint64_t address, std::span<uint32_t> words) {
+    constexpr std::array<uint32_t, 4> descriptor{0x8000u, 16u << 16u, 4u, 0x14facu};
+    if (address % 4u || words.size() != 1) return false;
+    if (address >= 0x2000u && address < 0x2010u) {
+      words[0] = descriptor[(address - 0x2000u) / 4u];
+      return true;
+    }
+    if (address != 0x8000u) return false;
+    words[0] = *static_cast<uint32_t *>(data);
+    return true;
+  };
+  const SrtRuntime runtime{.read_memory = read, .userdata = &count_value, .read_specialization_memory = read};
+  ResourceSnapshot snapshot;
+  ResourceSpecialization specialization;
+  for (const uint32_t value : {0u, 3u}) {
+    count_value = value;
+    Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
+              snapshot.buffers[0].dwords[0] == 0x8000u,
+          "materialization lost the count buffer's descriptor");
+    const auto captured = std::ranges::any_of(snapshot.specialization_reads, [](const auto &read) {
+      return read.first < 0x8000u + 16u * 4u && read.first + read.second > 0x8000u;
+    });
+    Check(captured != written, written ? "branch on a buffer the shader writes became a specialization read"
+                                       : "branch on a read-only buffer was not specialized");
   }
 }
 
@@ -1951,6 +2056,7 @@ void DbgExit(int) { std::abort(); }
 
 int main() {
   TestMappedSrtUsesDirectReaderByDefault();
+  TestNullPageSrtReadsZero();
   TestNativeNestedSrtRefresh();
   TestIntegerRuntimeValueFollowsSrtReads();
   TestSrtAliasesRetainReadPolicy();
@@ -1966,6 +2072,9 @@ int main() {
   for (const bool independent_mask : {false, true})
     TestEmptyTraversalSkipsUnmappedDescriptor(independent_mask);
   TestEmptyTraversalSkipsUnmappedDescriptor(false, true);
+  for (const bool unsigned_bound : {true, false})
+    for (const bool written : {true, false})
+      TestBranchOnWrittenBufferNotCaptured(unsigned_bound, written);
   TestCyclicControlPredicatesRemainUnknown();
   TestEmptyScalarBufferSpecialization();
   TestMixedSamplerVariantsShareRuntimeDescriptor();

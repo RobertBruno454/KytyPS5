@@ -402,6 +402,10 @@ struct PthreadPrivate {
 	std::atomic_bool      detached;
 	std::atomic_bool      almost_done;
 	std::atomic_bool      free;
+	// The host pthread_t in `p` names a live winpthread/pthread object. Pooled objects keep
+	// the previous thread's handle after a join; winpthread dereferences a stale handle
+	// without a null check in pthread_getschedparam/setschedparam (host crash at 0xbc).
+	std::atomic_bool      host_valid {false};
 	uint64_t              host_thread_id;
 	uintptr_t             guest_host_rbx;
 	uintptr_t             guest_host_rsp;
@@ -1018,6 +1022,7 @@ void PthreadInitSelfForMainThread() {
 	g_pthread_self->guest.thread_id = ++g_pthread_thread_id;
 	g_pthread_self->unique_id       = Common::Thread::GetThreadIdUnique();
 	g_pthread_self->free            = false;
+	g_pthread_self->host_valid      = true;
 	g_pthread_self->detached        = false;
 	g_pthread_self->almost_done     = false;
 	g_pthread_self->entry           = nullptr;
@@ -1526,7 +1531,8 @@ Pthread PthreadPool::Create() {
 
 	for (auto* p: m_threads) {
 		if (p->free) {
-			p->free = false;
+			p->host_valid = false;
+			p->free       = false;
 			return p;
 		}
 	}
@@ -1534,6 +1540,7 @@ Pthread PthreadPool::Create() {
 	auto* ret = new PthreadPrivate {};
 
 	ret->free        = false;
+	ret->host_valid  = false;
 	ret->detached    = false;
 	ret->almost_done = false;
 	ret->attr        = nullptr;
@@ -3161,7 +3168,7 @@ bool PthreadGetGuestStack(Pthread thread, uint64_t* stack_addr, uint64_t* stack_
 }
 
 int PthreadGetPriorityForKernel(Pthread thread) {
-	if (thread == nullptr) {
+	if (thread == nullptr || !thread->host_valid) {
 		return 700;
 	}
 
@@ -3201,6 +3208,9 @@ static void CleanupThread(void* arg) {
 	auto* rt = Common::Singleton<Loader::RuntimeLinker>::Instance();
 	rt->DeleteTlss(thread->unique_id);
 
+	if (thread->detached) {
+		thread->host_valid = false;
+	}
 	thread->almost_done = true;
 }
 
@@ -3217,7 +3227,8 @@ static void* RunThread(void* arg) {
 
 	thread->unique_id = Common::Thread::GetThreadIdUnique();
 
-	g_pthread_self = thread;
+	g_pthread_self     = thread;
+	thread->host_valid = true;
 
 	uint64_t os_thread_id = 0;
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
@@ -3311,6 +3322,8 @@ int KYTY_SYSV_ABI PthreadCreate(Pthread* thread, const PthreadAttr* attr,
 
 		if (result != 0) {
 			FreeGuestStack(created_thread->attr);
+		} else if (!created_thread->detached || !created_thread->almost_done) {
+			created_thread->host_valid = true;
 		}
 	}
 
@@ -3360,7 +3373,12 @@ int KYTY_SYSV_ABI PthreadJoin(Pthread thread, void** value) {
 		return KERNEL_ERROR_EINVAL;
 	}
 
-	int result = pthread_join(thread->p, value);
+	// Queries racing the join must not reach the handle the join is about to free.
+	const bool was_host_valid = thread->host_valid.exchange(false);
+	int        result         = pthread_join(thread->p, value);
+	if (result != 0) {
+		thread->host_valid = was_host_valid;
+	}
 
 	if (PRINT_NAME_ENABLED) {
 		LOGF("\tthread join: %s, %d\n", thread->name.c_str(), result);
@@ -3486,7 +3504,7 @@ int KYTY_SYSV_ABI PthreadSetcanceltype(int type, int* old_type) {
 int KYTY_SYSV_ABI PthreadGetprio(Pthread thread, int* prio) {
 	PRINT_NAME();
 
-	if (thread == nullptr) {
+	if (thread == nullptr || !thread->host_valid) {
 		return KERNEL_ERROR_ESRCH;
 	}
 
@@ -3506,7 +3524,7 @@ int KYTY_SYSV_ABI PthreadGetprio(Pthread thread, int* prio) {
 int KYTY_SYSV_ABI PthreadSetprio(Pthread thread, int prio) {
 	PRINT_NAME();
 
-	if (thread == nullptr) {
+	if (thread == nullptr || !thread->host_valid) {
 		return KERNEL_ERROR_ESRCH;
 	}
 

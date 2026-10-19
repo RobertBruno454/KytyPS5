@@ -611,6 +611,10 @@ static TextureDescDerivation DeriveTextureDesc(const ShaderRecompiler::IR::Image
 	} else {
 		desc.info.UpdateSize();
 	}
+	if (!desc.info.NormalizeMipView(view_base, view_levels)) {
+		EXIT("unsupported guest mip view: base=%u count=%u extent=%ux%ux%u\n",
+		     view_base, view_levels, width, height, volume ? depth : 1u);
+	}
 	const auto alignment = desc.info.DataAlignment();
 	EXIT_NOT_IMPLEMENTED(desc.info.data.size == 0 || alignment == 0 ||
 	                     (address & (static_cast<uint64_t>(alignment) - 1u)) != 0);
@@ -1755,6 +1759,8 @@ void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
 			     m_context.GetGraphics().GetPhysicalDeviceProperties().limits.maxUniformBufferRange});
 			prepared.uniform_buffers[resource.uniform_index] = view;
 		}
+		prepared.shader_data[layout.MemoryRangeDword() + index] =
+		    static_cast<uint32_t>(prepared.buffers[index].range);
 	}
 	if (layout.descriptor_counts[static_cast<size_t>(BindingKind::FlattenedSrt)] != 0) {
 		prepared.flattened_srt = NativeUpload(m_context, snapshot.flattened_srt);

@@ -27,6 +27,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cstdlib>
 #include <fmt/format.h>
 #include <list>
 #include <thread>
@@ -1806,6 +1807,21 @@ KYTY_SYSV_ABI int VideoOutWaitVblank(int handle) {
 	return OK;
 }
 
+// Test switch: report a 1080p display to titles that size their buffers from the output
+// status. Opt-in only; the default keeps the console behavior (4K without detection).
+static bool ForceFhdOutputStatus() {
+	static const bool forced = [] {
+		const char* value   = std::getenv("KYTY_OUTPUT_1080P");
+		const bool  enabled = value != nullptr && value[0] != '\0' && value[0] != '0';
+		if (enabled) {
+			Log::WriteToConsoleAndLog(
+			    "VideoOut: KYTY_OUTPUT_1080P is set; reporting a 1080p output to the game.\n");
+		}
+		return enabled;
+	}();
+	return forced;
+}
+
 KYTY_SYSV_ABI int VideoOutGetOutputStatus(int handle, VideoOutOutputStatus* status) {
 	PRINT_NAME();
 
@@ -1826,7 +1842,18 @@ KYTY_SYSV_ABI int VideoOutGetOutputStatus(int handle, VideoOutOutputStatus* stat
 	ctx->mutex.Lock();
 	// Primary output reports 4K unless param.json Video-out Info enables resolution detection.
 	status->resolution =
-	    ((attribute3 & 4) != 0 && ctx->width < 3840 && ctx->height < 2160 ? 1u : 2u);
+	    (ForceFhdOutputStatus() ||
+	             ((attribute3 & 4) != 0 && ctx->width < 3840 && ctx->height < 2160)
+	         ? 1u
+	         : 2u);
+	{
+		static std::atomic_bool logged {false};
+		if (!logged.exchange(true, std::memory_order_relaxed)) {
+			Log::WriteToConsoleAndLog(fmt::format(
+			    "VideoOut: game queried the output status; reporting resolution {} ({})\n",
+			    status->resolution, status->resolution == 1u ? "1080p" : "4K"));
+		}
+	}
 	status->dynamicRange = hdr_allowed && DriverState().IsHdrSupported() ? 2u : 1u;
 	status->refreshRate =
 	    (ctx->output_mode == VIDEO_OUT_OUTPUT_MODE_119_88HZ || Config::GetVblankFrequency() >= 119

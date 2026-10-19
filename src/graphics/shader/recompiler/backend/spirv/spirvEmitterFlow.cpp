@@ -863,8 +863,20 @@ uint32_t EmitReadFirstLane(ValueEmitContext& ctx, const IR::Inst& inst) {
 		                          GLSLstd450FindILsb, EmitHostBallotWord(state, ctx.Arg(inst, 1)));
 		return ReadHostSubgroupLane(state, TypeU32(state), ctx.Arg(inst, 0), first);
 	}
+	auto&      state  = ctx.state;
+	const auto exec   = inst.Arg(1).Resolve();
 	const auto ballot = ctx.Ballot(inst.Arg(1));
-	const auto lane   = ctx.FirstLane(ballot);
+	auto       lane   = ctx.FirstLane(ballot);
+	if (!exec.IsImmediate() || !exec.U1()) {
+		const auto low  = state.builder.AllocateId();
+		const auto high = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpCompositeExtract, TypeU32(state), low, ballot, 0);
+		state.builder.AddFunction(spv::OpCompositeExtract, TypeU32(state), high, ballot, 1);
+		lane =
+		    Select(state, TypeU32(state),
+		           EmitCompareU32Constant(state, spv::OpINotEqual, EmitOrU32(state, low, high), 0u),
+		           lane, ConstantU32(state, 0));
+	}
 	return ctx.Shuffle(inst, 0, lane);
 }
 
@@ -895,15 +907,42 @@ uint32_t EmitReadLane(ValueEmitContext& ctx, const IR::Inst& inst) {
 	return ctx.Shuffle(inst, 0, lane);
 }
 
-uint32_t EmitSubgroupUMinU32(ValueEmitContext& ctx, const IR::Inst& inst) {
-	auto& state = ctx.state;
+uint32_t EmitSubgroupReduceU32(ValueEmitContext& ctx, const IR::Inst& inst) {
+	auto&   state = ctx.state;
+	spv::Op op {};
+	uint32_t (*combine)(EmitterState&, uint32_t, uint32_t) = nullptr;
+	switch (inst.Flags<IR::ValueOpcode>()) {
+		case IR::ValueOpcode::IAdd32: op = spv::OpGroupNonUniformIAdd, combine = EmitIAdd32; break;
+		case IR::ValueOpcode::UMin32: op = spv::OpGroupNonUniformUMin, combine = EmitUMin32; break;
+		case IR::ValueOpcode::UMax32: op = spv::OpGroupNonUniformUMax, combine = EmitUMax32; break;
+		case IR::ValueOpcode::SMin32: op = spv::OpGroupNonUniformSMin, combine = EmitSMin32; break;
+		case IR::ValueOpcode::SMax32: op = spv::OpGroupNonUniformSMax, combine = EmitSMax32; break;
+		case IR::ValueOpcode::BitwiseAnd32:
+			op = spv::OpGroupNonUniformBitwiseAnd, combine = EmitBitwiseAnd32;
+			break;
+		case IR::ValueOpcode::BitwiseOr32:
+			op = spv::OpGroupNonUniformBitwiseOr, combine = EmitBitwiseOr32;
+			break;
+		case IR::ValueOpcode::BitwiseXor32:
+			op = spv::OpGroupNonUniformBitwiseXor, combine = EmitBitwiseXor32;
+			break;
+		default: ctx.Fail(inst, "has an unsupported subgroup reduction");
+	}
 	auto value = ctx.Arg(inst, 0);
 	if (ctx.other_half != nullptr) {
-		value = EmitUMin32(state, ctx.HalfArg(inst, 0, 0), ctx.HalfArg(inst, 0, 1));
+		value = combine(state, ctx.HalfArg(inst, 0, 0), ctx.HalfArg(inst, 0, 1));
 	}
 	const auto result = state.builder.AllocateId();
-	state.builder.AddFunction(spv::OpGroupNonUniformUMin, TypeU32(state), result,
-	                          ConstantU32(state, spv::ScopeSubgroup), spv::GroupOperationReduce, value);
+	if (state.packed_wave32) {
+		// Two guest wave32s share one 64-lane host subgroup: reduce each 32-lane cluster so
+		// one wave's result never mixes in the other wave's lanes.
+		state.builder.AddFunction(op, TypeU32(state), result,
+		                          ConstantU32(state, spv::ScopeSubgroup),
+		                          spv::GroupOperationClusteredReduce, value, ConstantU32(state, 32));
+		return result;
+	}
+	state.builder.AddFunction(op, TypeU32(state), result, ConstantU32(state, spv::ScopeSubgroup),
+	                          spv::GroupOperationReduce, value);
 	if (state.split_wave) {
 		// Each host subgroup reduces its half; the other half's result arrives through the
 		// exchange, from the matching lane of that half.
@@ -911,7 +950,7 @@ uint32_t EmitSubgroupUMinU32(ValueEmitContext& ctx, const IR::Inst& inst) {
 		    state, result,
 		    EmitBinaryU32(state, spv::OpBitwiseXor, EmitLocalInvocationIndex(state),
 		                  ConstantU32(state, 32)));
-		return EmitUMin32(state, result, other);
+		return combine(state, result, other);
 	}
 	return result;
 }
@@ -986,6 +1025,109 @@ uint32_t EmitPermlane16U32(ValueEmitContext& ctx, const IR::Inst& inst) {
 	// min/max/and/or reductions across the row halves from picking up zero or undefined data.
 	return EmitNative<spv::OpSelect, IR::Type::U32>(state, EmitLanePresent(ctx, target), result,
 	                                                ctx.Arg(inst, 0));
+}
+
+namespace {
+
+uint32_t GroupOr(EmitterState& state, spv::GroupOperation operation, uint32_t value) {
+	const auto result = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpGroupNonUniformBitwiseOr, TypeU32(state), result,
+	                          ConstantU32(state, spv::ScopeSubgroup),
+	                          static_cast<uint32_t>(operation), value);
+	return result;
+}
+
+uint32_t LaneTest(EmitterState& state, spv::Op compare, uint32_t lhs, uint32_t rhs) {
+	return Binary(state, compare, TypeBool(state), lhs, rhs);
+}
+
+// OR of `value` over the host invocations whose lane bit is set in `lanes`.
+uint32_t ReduceLaneSet(EmitterState& state, uint32_t lane, uint32_t value, uint64_t lanes) {
+	const auto word = Select(state, TypeU32(state),
+	                         LaneTest(state, spv::OpULessThan, lane, ConstantU32(state, 32)),
+	                         ConstantU32(state, static_cast<uint32_t>(lanes)),
+	                         ConstantU32(state, static_cast<uint32_t>(lanes >> 32u)));
+	const auto bit  = EmitBinaryU32(
+	    state, spv::OpBitwiseAnd,
+	    EmitBinaryU32(state, spv::OpShiftRightLogical, word,
+	                  EmitBinaryU32(state, spv::OpBitwiseAnd, lane, ConstantU32(state, 31))),
+	    ConstantU32(state, 1));
+	const auto in_set = LaneTest(state, spv::OpINotEqual, bit, ConstantU32(state, 0));
+	return GroupOr(state, spv::GroupOperationReduce,
+	               Select(state, TypeU32(state), in_set, value, ConstantU32(state, 0)));
+}
+
+// Lanes of the wave whose leaves reach `lane` (0..63) through the pattern.
+uint64_t PatternLanes(IR::WaveOrPattern pattern, uint32_t lane) {
+	const uint64_t opposite_row = 0xffffull << (((lane >> 4u) ^ 1u) * 16u);
+	if (pattern == IR::WaveOrPattern::OppositeRow) {
+		return opposite_row;
+	}
+	const uint64_t half_start = (lane & 32u) != 0u ? 32u : 0u;
+	const uint64_t up_to_lane =
+	    (lane == 63u ? ~0ull : (2ull << lane) - 1ull) & ~((1ull << half_start) - 1ull);
+	return (lane & 16u) == 0u ? up_to_lane | opposite_row : up_to_lane;
+}
+
+} // namespace
+
+uint32_t EmitWaveOrPatternU32(ValueEmitContext& ctx, const IR::Inst& inst) {
+	auto&      state     = ctx.state;
+	const auto pattern   = inst.Flags<IR::WaveOrPattern>();
+	const auto leaf      = ctx.Arg(inst, 0);
+	const auto lane      = EmitSubgroupLocalInvocationId(state);
+	const auto zero      = ConstantU32(state, 0);
+	const auto u32       = TypeU32(state);
+	const auto row_total = [&](uint32_t first, uint32_t mask) {
+		const auto row = EmitBinaryU32(state, spv::OpBitwiseAnd, lane, ConstantU32(state, mask));
+		return GroupOr(state, spv::GroupOperationReduce,
+		               Select(state, u32,
+		                      LaneTest(state, spv::OpIEqual, row, ConstantU32(state, first)), leaf,
+		                      zero));
+	};
+	const auto even_row =
+	    LaneTest(state, spv::OpIEqual,
+	             EmitBinaryU32(state, spv::OpBitwiseAnd, lane, ConstantU32(state, 16)), zero);
+	if (ctx.other_half != nullptr) {
+		// Each host subgroup holds one 32-lane half: rows 0 and 1 of that half.
+		const auto odd_total = row_total(16, 16);
+		if (pattern == IR::WaveOrPattern::OppositeRow) {
+			return Select(state, u32, even_row, odd_total, row_total(0, 16));
+		}
+		const auto scan = GroupOr(state, spv::GroupOperationInclusiveScan, leaf);
+		return EmitBinaryU32(state, spv::OpBitwiseOr, scan,
+		                     Select(state, u32, even_row, odd_total, zero));
+	}
+	const auto high = LaneTest(state, spv::OpUGreaterThanEqual, lane, ConstantU32(state, 32));
+	const auto row1 = row_total(16, 48);
+	const auto row3 = row_total(48, 48);
+	if (pattern == IR::WaveOrPattern::OppositeRow) {
+		const auto row0 = row_total(0, 48);
+		const auto row2 = row_total(32, 48);
+		return Select(state, u32, high, Select(state, u32, even_row, row3, row2),
+		              Select(state, u32, even_row, row1, row0));
+	}
+	const auto scan_low =
+	    GroupOr(state, spv::GroupOperationInclusiveScan, Select(state, u32, high, zero, leaf));
+	const auto scan_high =
+	    GroupOr(state, spv::GroupOperationInclusiveScan, Select(state, u32, high, leaf, zero));
+	const auto scan = Select(state, u32, high, scan_high, scan_low);
+	const auto pair = Select(state, u32, high, row3, row1);
+	return EmitBinaryU32(state, spv::OpBitwiseOr, scan, Select(state, u32, even_row, pair, zero));
+}
+
+uint32_t EmitWaveOrPatternLaneU32(ValueEmitContext& ctx, const IR::Inst& inst) {
+	auto&      state = ctx.state;
+	const auto lanes = PatternLanes(inst.Flags<IR::WaveOrPattern>(), inst.Arg(1).U32() & 63u);
+	const auto lane  = EmitSubgroupLocalInvocationId(state);
+	if (ctx.other_half == nullptr) {
+		return ReduceLaneSet(state, lane, ctx.Arg(inst, 0), lanes);
+	}
+	// Both halves are emitted here; the high half reuses this result.
+	const auto low = ReduceLaneSet(state, lane, ctx.HalfArg(inst, 0, 0), lanes & 0xffffffffull);
+	const auto high =
+	    ReduceLaneSet(state, lane, ctx.HalfArg(inst, 0, 1), (lanes >> 32u) & 0xffffffffull);
+	return EmitBinaryU32(state, spv::OpBitwiseOr, low, high);
 }
 
 uint32_t EmitGetAttribute(ValueEmitContext& ctx, const IR::Inst& inst) {

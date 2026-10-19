@@ -534,7 +534,7 @@ void Visit(Program& program, ShaderStageInputInfo input_info, InputUsage& inputs
 			    inst.Flags<CFG::BranchCondition>() != CFG::BranchCondition::ScalarInstruction;
 			break;
 		case ValueOpcode::Ballot: info.subgroup_ballot = true; break;
-		case ValueOpcode::SubgroupUMinU32: info.subgroup_arithmetic = true; break;
+		case ValueOpcode::SubgroupReduceU32: info.subgroup_arithmetic = true; break;
 		case ValueOpcode::DppMoveU32:
 		case ValueOpcode::ReadFirstLane:
 		case ValueOpcode::ReadLane: {
@@ -551,6 +551,11 @@ void Visit(Program& program, ShaderStageInputInfo input_info, InputUsage& inputs
 			info.subgroup_local_invocation_id = true;
 			break;
 		}
+		case ValueOpcode::WaveOrPatternU32:
+		case ValueOpcode::WaveOrPatternLaneU32:
+			info.subgroup_arithmetic          = true;
+			info.subgroup_local_invocation_id = true;
+			break;
 		case ValueOpcode::SwizzleU32:
 			info.uses_swizzle = true;
 			[[fallthrough]];
@@ -598,6 +603,7 @@ void CollectShaderInfo(Program& program, ShaderStageInputInfo input_info) {
 	    info.function_lds = info.function_scratch = info.pixel_valid_mask = info.buffer_int64_atomics =
 	    info.buffer_u8 = info.buffer_u16 = info.shared_int64_atomics = info.coherent_buffers = info.float64 =
 	    info.float16 = false;
+	info.subgroup_arithmetic = false;
 	InputUsage inputs;
 	inputs.not_constant.assign(info.buffers.size(), false);
 	for (const auto* block: program.blocks) {

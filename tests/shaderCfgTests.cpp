@@ -264,6 +264,40 @@ bool SpirvSourceHasInstructionUsing(const std::string &source,
   return false;
 }
 
+// Storage-buffer accesses are bounded by each slot's exact descriptor range from shader data.
+// Returns the position of the first OpULessThan whose limit is that range of `slot`, or the
+// range shifted to the view's element size; npos if there is none.
+size_t SpirvBufferRangeBoundPosition(const std::string &source,
+                                     const ShaderRecompiler::IR::Bindings &layout,
+                                     uint32_t slot = 0) {
+  const bool push = layout.UsesPushData();
+  const auto range_dword = (push ? layout.push_data_start_dword : 0u) + layout.MemoryRangeDword() + slot;
+  const auto range_pointer = std::string(push ? "%vsharp" : "%shader_data") + " %uint_0 %uint_" +
+                             std::to_string(range_dword);
+  std::unordered_set<std::string> pointers, limits;
+  std::istringstream lines(source);
+  std::string line;
+  size_t position = 0;
+  while (std::getline(lines, line)) {
+    const auto at = position;
+    position += line.size() + 1;
+    std::istringstream stream(line);
+    std::vector<std::string> words;
+    for (std::string word; stream >> word;) words.push_back(word);
+    if (words.size() < 5 || words[1] != "=") continue;
+    if (words[2] == "OpAccessChain" && line.ends_with(range_pointer)) {
+      pointers.insert(words[0]);
+    } else if (words[2] == "OpLoad" && pointers.contains(words[4])) {
+      limits.insert(words[0]);
+    } else if (words[2] == "OpShiftRightLogical" && limits.contains(words[4])) {
+      limits.insert(words[0]);
+    } else if (words[2] == "OpULessThan" && words.size() >= 6 && limits.contains(words[5])) {
+      return at;
+    }
+  }
+  return std::string::npos;
+}
+
 bool SpirvContainsOpcode(const std::vector<uint32_t> &binary, uint32_t opcode) {
   for (size_t i = 5; i < binary.size();) {
     const uint32_t word = binary[i];
@@ -1295,6 +1329,53 @@ void TestNormalizedImageContracts() {
             ImageViewOps::FormatsCompatible(vk::Format::eBc3UnormBlock,
                                             vk::Format::eR32G32B32A32Uint),
         "Vulkan image-view compatibility classes diverged from production");
+}
+
+void TestOversizedGuestMipViews() {
+  for (uint32_t layers : {1u, 2u}) {
+    ImageInfo physical{};
+    physical.data.address = 0x12f4f48000;
+    physical.pixel_format = vk::Format::eR32G32B32A32Uint;
+    physical.guest_format = Prospero::BufferFormat::k32_32_32_32UInt;
+    physical.extent = {64, 64, 1};
+    physical.resources = {9, layers};
+    physical.tile_mode = Prospero::TileMode::kStandard4KB;
+    physical.UpdateSize();
+    for (uint32_t selected : {0u, 6u, 7u, 8u}) {
+      auto view = physical;
+      auto base = selected;
+      Check(view.NormalizeMipView(base, 1), "extra guest mip could not be represented");
+      const auto first = selected < 7 ? 0u : selected;
+      Check(base == selected - first && view.guest_base_mip == first &&
+                view.guest_mip_levels == 9 &&
+                view.resources.levels == (first == 0 ? 7u : 1u),
+            "guest mip view was incorrectly rebased");
+      for (int repeat = 0; repeat < 2; ++repeat) {
+        Check(view.data.address == physical.data.address &&
+                  view.data.size == physical.data.size &&
+                  view.tiled_slice_stride == physical.tiled_slice_stride,
+              "rebased guest mip changed allocation or array stride");
+        for (uint32_t level = 0; level < view.resources.levels; ++level) {
+          Check(view.mip_layout[level] == physical.mip_layout[first + level] &&
+                    view.MipExtent(level) == physical.MipExtent(first + level) &&
+                    (level >= view.first_tail_level) ==
+                        (first + level >= physical.first_tail_level),
+                "rebased mip lost original offsets, extent or tail coordinates");
+        }
+        for (const auto& copy : view.BufferCopies()) {
+          Check(copy.imageSubresource.mipLevel < view.resources.levels &&
+                    copy.bufferOffset < view.LinearSize(),
+                "rebased upload references an invalid mip or staging offset");
+        }
+        view.UpdateSize();
+      }
+    }
+    auto invalid = physical;
+    uint32_t base = 7;
+    Check(!invalid.NormalizeMipView(base, 2) && base == 7 &&
+              invalid.resources.levels == 9 && invalid.guest_mip_levels == 0,
+          "unrepresentable multi-mip view was silently truncated");
+  }
 }
 
 void TestRebasedTextureMipViews() {
@@ -7383,7 +7464,7 @@ void TestNewShaderRecompilerMubufFormatTranslation() {
   CheckSpirvBinaryValidates(result.spirv);
 }
 
-void TestNewShaderRecompilerFormattedStoreUsesRuntimeArrayLengthOnly() {
+void TestNewShaderRecompilerFormattedStoreUsesRuntimeRangeOnly() {
   const uint32_t shader[] = {
       EncodeMubuf0(0x04),
       EncodeMubuf1(0, 0, 1), // buffer_store_format_x
@@ -7410,8 +7491,9 @@ void TestNewShaderRecompilerFormattedStoreUsesRuntimeArrayLengthOnly() {
   CheckSpirvBinaryValidates(result.spirv);
 
   const auto source = DisassembleSpirvBinary(result.spirv);
-  Check((source.find("OpArrayLength") != std::string::npos),
-        "formatted store SPIR-V lacks runtime storage-buffer bounds check");
+  Check(SpirvBufferRangeBoundPosition(source, result.program.bindings) != std::string::npos &&
+            source.find("OpArrayLength") == std::string::npos,
+        "formatted store SPIR-V is not bounded by the runtime descriptor range");
   Check(
       !SpirvSourceHasInstructionUsing(source, "OpULessThan", "%uint_5"),
       "formatted store SPIR-V baked descriptor NumRecords into a store guard");
@@ -10538,19 +10620,18 @@ void TestNewShaderRecompilerBufferLoadsGuardedByExec() {
   const auto source = DisassembleSpirvBinary(result.spirv);
   const auto exec_branch =
       source.find("OpBranchConditional", 0);
-  const auto array_length =
-      source.find("OpArrayLength", 0);
-  const auto bounds_branch = source.find("OpBranchConditional", array_length);
+  const auto bounds_check = SpirvBufferRangeBoundPosition(source, result.program.bindings);
+  const auto bounds_branch = source.find("OpBranchConditional", bounds_check);
   const auto element_access = source.find("OpAccessChain %_ptr_StorageBuffer_uint", 0);
   Check(exec_branch != std::string::npos,
         "buffer load SPIR-V lacks EXEC guard branch");
-  Check(array_length != std::string::npos,
-        "buffer load SPIR-V lacks storage buffer array-length bounds check");
+  Check(bounds_check != std::string::npos,
+        "buffer load SPIR-V lacks storage buffer range bounds check");
   Check(bounds_branch != std::string::npos,
         "buffer load SPIR-V lacks storage buffer bounds branch");
   Check(element_access != std::string::npos,
         "buffer load SPIR-V lacks storage element access");
-  Check(exec_branch < array_length,
+  Check(exec_branch < bounds_check,
         "buffer load bounds check was emitted outside EXEC guard");
   Check(bounds_branch < element_access,
         "buffer load storage element pointer was formed before bounds guard");
@@ -10583,13 +10664,12 @@ void TestNewShaderRecompilerBufferAtomicsGuardedByBounds() {
     CheckSpirvBinaryValidates(result.spirv);
 
     const auto source = DisassembleSpirvBinary(result.spirv);
-    const auto array_length =
-        source.find("OpArrayLength", 0);
-    const auto bounds_branch = source.find("OpBranchConditional", array_length);
+    const auto bounds_check = SpirvBufferRangeBoundPosition(source, result.program.bindings);
+    const auto bounds_branch = source.find("OpBranchConditional", bounds_check);
     const auto atomic = source.find(test.spirv, 0);
     const auto memory_barrier =
         source.find("OpMemoryBarrier", atomic);
-    Check(array_length != std::string::npos &&
+    Check(bounds_check != std::string::npos &&
               bounds_branch != std::string::npos &&
               atomic != std::string::npos &&
               memory_barrier != std::string::npos,
@@ -10638,14 +10718,13 @@ void TestCapturedBufferAtomicsX2() {
           "64-bit buffer atomic storage view does not use eight-byte elements");
     Check(CountSourceOccurrences(source, "Aliased") == 2u,
           "both storage-buffer views must declare that they alias");
-    const auto array_length =
-        source.find("OpArrayLength", 0);
-    const auto bounds_branch = source.find("OpBranchConditional", array_length);
+    const auto bounds_check = SpirvBufferRangeBoundPosition(source, result.program.bindings);
+    const auto bounds_branch = source.find("OpBranchConditional", bounds_check);
     const auto atomic =
         source.find(test.spirv_name, 0);
     const auto memory_barrier =
         source.find("OpMemoryBarrier", atomic);
-    Check(array_length != std::string::npos &&
+    Check(bounds_check != std::string::npos &&
               bounds_branch != std::string::npos &&
               atomic != std::string::npos && bounds_branch < atomic,
           "64-bit buffer atomic was not guarded by storage-buffer bounds");
@@ -11923,7 +12002,8 @@ void TestNewShaderRecompilerPrunesUnreachableSetpcMetadata() {
         "unreachable S_SETPC metadata suppressed a reachable scalar load component");
 }
 
-void TestNewShaderRecompilerSetpcDwordJumpTable() {
+void TestNewShaderRecompilerSetpcDwordJumpTable(bool reuse_selector) {
+  const uint32_t offset_reg = reuse_selector ? 106u : 6u;
   const uint32_t shader[] = {
       EncodeSopp(0x02, 1),             // skip one unreachable block
       EncodeSMovB32(100, 129),         // unreachable
@@ -11933,10 +12013,10 @@ void TestNewShaderRecompilerSetpcDwordJumpTable() {
       EncodeSop2(0x00, 4, 4, 255),     // s_add_u32 s4, s4, literal
       0x00000034u,
       EncodeSop2(0x04, 5, 5, 128), // s_addc_u32 s5, s5, 0
-      EncodeSmem0(0x00, 6, 2),
-      (106u << 25u) | 4u,          // s_load_dword s6, s[4:5], vcc_lo offset:4
+      EncodeSmem0(0x00, offset_reg, 2),
+      (106u << 25u) | 4u,          // load into s6 or overwrite the selector vcc_lo
       EncodeSopp(0x0c, 0),         // s_waitcnt 0
-      EncodeSop2(0x01, 4, 4, 6),   // s_sub_u32 s4, s4, s6
+      EncodeSop2(0x01, 4, 4, offset_reg), // subtract the loaded table entry
       EncodeSop2(0x05, 5, 5, 128), // s_subb_u32 s5, s5, 0
       EncodeSop1(0x20, 0, 4),      // s_setpc_b64 s[4:5]
       EncodeSMovB32(1, 129),       // case 0
@@ -11976,6 +12056,57 @@ void TestNewShaderRecompilerSetpcDwordJumpTable() {
         "subtractive S_SETPC_B64 table load reached normal IR");
   Check(SpirvContainsOpcode(result.spirv, 251),
         "subtractive S_SETPC_B64 dispatcher lacks OpSwitch");
+  CheckSpirvBinaryValidates(result.spirv);
+}
+
+void TestNewShaderRecompilerSetpcDwordJumpTableAliasedSelector() {
+  // NHL 27 (PPSA34063) shape: the table load overwrites its own index register.
+  const uint32_t shader[] = {
+      EncodeSop2(0x07, 6, 0, 130), // s_min_u32 s6, s0, 2
+      EncodeSop2(0x1e, 6, 6, 130), // s_lshl_b32 s6, s6, 2
+      EncodeSop1(0x1f, 4, 0),      // s_getpc_b64 s[4:5]
+      EncodeSop2(0x00, 4, 4, 255), // s_add_u32 s4, s4, literal
+      0x00000034u,
+      EncodeSop2(0x04, 5, 5, 128), // s_addc_u32 s5, s5, 0
+      EncodeSmem0(0x00, 6, 2),
+      (6u << 25u),                 // s_load_dword s6, s[4:5], s6
+      EncodeSopp(0x0c, 0),         // s_waitcnt 0
+      EncodeSop2(0x01, 4, 4, 6),   // s_sub_u32 s4, s4, s6
+      EncodeSop2(0x05, 5, 5, 128), // s_subb_u32 s5, s5, 0
+      EncodeSop1(0x20, 0, 4),      // s_setpc_b64 s[4:5]
+      EncodeSMovB32(1, 129),       // case 0 at pc 0x30
+      EncodeSopp(0x02, 1),
+      EncodeSMovB32(2, 129), // case 1 at pc 0x38
+      EncodeSopp(0x01, 0),
+      0x00000010u,
+      0x00000008u,
+      0x00000010u, // table at pc 0x40, targets relative backward from pc 0x40
+  };
+
+  auto options = MakeCompileOptions(ShaderType::Compute);
+  options.dump_ir = true;
+
+  auto result = RecompileForTest(shader, options);
+  Check((result.ir_dump.find("mode=dispatcher") != std::string::npos),
+        "aliased-selector S_SETPC_B64 table did not select dispatcher fallback");
+  const auto jump = std::find_if(
+      result.program.blocks.begin(), result.program.blocks.end(),
+      [](const auto *block) { return !block->terminator.cases.empty(); });
+  Check(jump != result.program.blocks.end() &&
+            (*jump)->ImmSuccessors().size() == 2 &&
+            (*jump)->terminator.indexed &&
+            (*jump)->terminator.cases.size() == 3 &&
+            (*jump)->terminator.cases[0].value == 0u &&
+            (*jump)->terminator.cases[0].target->start_pc == 0x30u &&
+            (*jump)->terminator.cases[1].value == 4u &&
+            (*jump)->terminator.cases[1].target->start_pc == 0x38u &&
+            (*jump)->terminator.cases[2].value == 8u &&
+            (*jump)->terminator.cases[2].target->start_pc == 0x30u,
+        "aliased-selector S_SETPC_B64 table targets or selector mapping changed");
+  Check((result.ir_dump.find("SLoadDword") == std::string::npos),
+        "aliased-selector S_SETPC_B64 table load reached normal IR");
+  Check(SpirvContainsOpcode(result.spirv, 251),
+        "aliased-selector S_SETPC_B64 dispatcher lacks OpSwitch");
   CheckSpirvBinaryValidates(result.spirv);
 }
 
@@ -16819,6 +16950,7 @@ int main(int argc, char** argv) {
   TestNativeShaderResourceDependencies();
   TestNormalizedImageContracts();
   TestRebasedTextureMipViews();
+  TestOversizedGuestMipViews();
   TestShaderFeatureCollection();
   TestTypedSpirvSerialization();
   TestDeferredSpirvPhiPatching();
@@ -16838,7 +16970,7 @@ int main(int argc, char** argv) {
   TestNewShaderRecompilerNativeWideBufferIr();
   TestNewShaderRecompilerScalarB64LaneTranslation();
   TestNewShaderRecompilerMubufFormatTranslation();
-  TestNewShaderRecompilerFormattedStoreUsesRuntimeArrayLengthOnly();
+  TestNewShaderRecompilerFormattedStoreUsesRuntimeRangeOnly();
   TestNewShaderRecompilerTypedBufferTranslation();
   TestNewShaderRecompilerDsReadWrite2Translation();
   TestNewShaderRecompilerDsWideAndAtomicTranslation();
@@ -16948,7 +17080,9 @@ int main(int argc, char** argv) {
   TestEmbeddedVertexFormatSwizzle();
   TestNewShaderRecompilerSetpcJumpTable();
   TestNewShaderRecompilerPrunesUnreachableSetpcMetadata();
-  TestNewShaderRecompilerSetpcDwordJumpTable();
+  TestNewShaderRecompilerSetpcDwordJumpTable(false);
+  TestNewShaderRecompilerSetpcDwordJumpTable(true);
+  TestNewShaderRecompilerSetpcDwordJumpTableAliasedSelector();
   TestTypedEntryStateIsMinimal();
 #if KYTY_PLATFORM != KYTY_PLATFORM_WINDOWS
   TestFinalSsaRejectsRegisterStatePseudos();

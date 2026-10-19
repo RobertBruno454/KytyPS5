@@ -31,6 +31,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <fmt/format.h>
@@ -40,6 +41,7 @@
 #include <optional>
 #include <span>
 #include <spirv-tools/libspirv.hpp>
+#include <string>
 #include <string_view>
 #include <unordered_set>
 #include <utility>
@@ -125,8 +127,11 @@ bool ReadShaderGuestMemory(void*, uint64_t address, std::span<uint32_t> values) 
 // Execution thread: the ordinary loads of an SRT walk.
 bool ReadGuestMemory(void*, uint64_t address, std::span<uint32_t> values) {
 	if (!Libs::LibKernel::Memory::TryReadAroundGpuWrites(address, values.data(),
-	                                                     values.size_bytes())) {
-		std::memcpy(values.data(), reinterpret_cast<const void*>(address), values.size_bytes());
+	                                                     values.size_bytes()) &&
+	    !Libs::LibKernel::Memory::TryReadBacking(address, values.data(), values.size_bytes())) {
+		// The walk evaluates loads the shader may never execute, e.g. through a null SRT table
+		// pointer: unmapped guest memory reads as zeros instead of faulting the host (#1549).
+		std::ranges::fill(values, 0u);
 	}
 	return true;
 }
@@ -146,6 +151,59 @@ bool ReadAheadShaderState(void* userdata, uint64_t address, void* data, uint64_t
 }
 
 } // namespace
+
+namespace {
+
+std::vector<uint64_t> ParseShaderHashList(const char* name) {
+	std::vector<uint64_t> hashes;
+	const char*           value = std::getenv(name);
+	if (value == nullptr) {
+		return hashes;
+	}
+	const std::string text(value);
+	size_t            pos = 0;
+	while (pos <= text.size()) {
+		auto end = text.find_first_of(",; ", pos);
+		if (end == std::string::npos) {
+			end = text.size();
+		}
+		auto token = text.substr(pos, end - pos);
+		if (token.size() > 2 && token[0] == '0' && (token[1] == 'x' || token[1] == 'X')) {
+			token = token.substr(2);
+		}
+		if (!token.empty()) {
+			char*      parse_end = nullptr;
+			const auto hash      = std::strtoull(token.c_str(), &parse_end, 16);
+			if (parse_end != nullptr && *parse_end == '\0') {
+				hashes.push_back(hash);
+			}
+		}
+		pos = end + 1;
+	}
+	for (const auto hash: hashes) {
+		Log::WriteToConsoleAndLog(fmt::format("{}: listed shader 0x{:016x}\n", name, hash));
+	}
+	return hashes;
+}
+
+// Compute programs are resolved on several threads here; each caller reads its own last hash.
+thread_local uint64_t t_last_compute_hash = 0;
+
+} // namespace
+
+bool ComputeShaderSkipRequested(uint64_t hash) {
+	static const auto list = ParseShaderHashList("KYTY_SKIP_CS");
+	return !list.empty() && std::find(list.begin(), list.end(), hash) != list.end();
+}
+
+bool ShaderDumpRequested(uint64_t hash) {
+	static const auto list = ParseShaderHashList("KYTY_DUMP_SHADER");
+	return !list.empty() && std::find(list.begin(), list.end(), hash) != list.end();
+}
+
+uint64_t PipelineCache::LastComputeHash() const noexcept {
+	return t_last_compute_hash;
+}
 
 bool GuestReadLog::Read(uint64_t address, void* data, uint64_t size, bool strict) {
 	if (size == 0 || size > UINT32_MAX ||
@@ -534,7 +592,8 @@ struct PipelineCache::ProgramCache {
 		options.shader_hash = params.hash;
 		options.user_data   = user_data;
 		options.back_code   = params.back_code;
-		options.dump_ir     = Config::GetShaderLogDirection() != Config::LogDirection::Silent;
+		options.dump_ir     = Config::GetShaderLogDirection() != Config::LogDirection::Silent ||
+		                  ShaderDumpRequested(params.hash);
 		options.early_dump  = options.dump_ir;
 		options.emit_debug_info = Config::GraphicsDebugDumpEnabled();
 		options.dump_label  = label;
@@ -560,9 +619,7 @@ struct PipelineCache::ProgramCache {
 	                uint32_t push_data_cursor) {
 		const auto matches = [&](const Permutation& candidate) {
 			const auto& layout = candidate.program.bindings;
-			return layout.push_data_start_dword ==
-			           ShaderRecompiler::IR::PushData::StartFor(push_data_cursor,
-			                                                    layout.ShaderDataDwords()) &&
+			return layout.push_data_start_dword == layout.PushDataStartFor(push_data_cursor) &&
 			       candidate.specialization == specialization &&
 			       (!entry.call_source ||
 			        std::ranges::equal(candidate.function_code, entry.FunctionCode()));
@@ -1917,6 +1974,7 @@ ShaderProgram PipelineCache::GetComputeProgram(const HW::ComputeShaderInfo& regs
                                                ProgramResolution*           ahead) {
 	input_info.host_subgroup_size = m_graphics.SupportsComputeWave64() ? 64u : 32u;
 	const auto        params      = PrepareProgram(regs, sh, input_info);
+	t_last_compute_hash           = params.hash;
 	input_info.lds_storage = input_info.lds_size_dwords * 4u >
 	    m_graphics.GetPhysicalDeviceProperties().limits.maxComputeSharedMemorySize;
 	// Indirect thread counts reach the shader through its shader data buffer.

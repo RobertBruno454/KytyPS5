@@ -284,6 +284,15 @@ public:
 		}
 		m_stream->Record([=](vk::CommandBuffer c) { c.dispatch(x, y, z); });
 	}
+	void dispatchBase(uint32_t base_x, uint32_t base_y, uint32_t base_z, uint32_t x, uint32_t y,
+	                  uint32_t z) const {
+		if (m_stream == nullptr) {
+			m_direct.dispatchBase(base_x, base_y, base_z, x, y, z);
+			return;
+		}
+		m_stream->Record(
+		    [=](vk::CommandBuffer c) { c.dispatchBase(base_x, base_y, base_z, x, y, z); });
+	}
 	void dispatchIndirect(vk::Buffer buffer, vk::DeviceSize offset) const {
 		if (m_stream == nullptr) {
 			m_direct.dispatchIndirect(buffer, offset);

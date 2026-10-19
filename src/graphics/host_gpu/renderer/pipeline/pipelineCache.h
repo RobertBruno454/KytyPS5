@@ -209,6 +209,8 @@ public:
 	                                const HW::ShaderRegisters&   sh,
 	                                ShaderComputeInputInfo&      input_info,
 	                                ProgramResolution*           ahead = nullptr);
+	// Hash of the program the calling thread's last GetComputeProgram call returned.
+	[[nodiscard]] uint64_t LastComputeHash() const noexcept;
 
 	// With `allow_async`, a pipeline that does not exist yet is created on a background thread
 	// and the lookup returns null until it is there (the draw can be skipped meanwhile);
@@ -331,6 +333,12 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& pipeline,
                             const ShaderComputeInputInfo& input_info,
                             vk::ShaderModule compute_module, vk::PipelineCache driver_cache);
+
+// Test switches read from the environment (comma-separated hex hashes):
+// KYTY_SKIP_CS lists compute shaders whose dispatches are dropped;
+// KYTY_DUMP_SHADER lists shaders whose RDNA disassembly and IR go to the log.
+[[nodiscard]] bool ComputeShaderSkipRequested(uint64_t hash);
+[[nodiscard]] bool ShaderDumpRequested(uint64_t hash);
 
 } // namespace Libs::Graphics
 

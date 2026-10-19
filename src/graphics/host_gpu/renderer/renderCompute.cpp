@@ -29,6 +29,7 @@
 #include "libs/errno.h"
 
 #include <algorithm>
+#include <fmt/format.h>
 #include <array>
 #include <atomic>
 #include <cmath>
@@ -279,6 +280,29 @@ static void BindSharedMemory(RenderContext& context, ShaderComputeInputInfo& inp
 	bindings.shared_memory = {storage.Handle(), 0, size};
 }
 
+
+namespace {
+
+// KYTY_SKIP_CS test switch: drop dispatches of listed compute shaders.
+bool SkipListedComputeDispatch(const ShaderComputeInputInfo& input_info, uint32_t x, uint32_t y,
+                               uint32_t z, bool indirect) {
+	// Programs can be resolved ahead on another thread, so take the hash from the program.
+	const auto* program = input_info.stage.program;
+	const auto  hash    = program != nullptr ? program->shader_hash : 0;
+	if (hash == 0 || !ComputeShaderSkipRequested(hash)) {
+		return false;
+	}
+	static std::atomic<uint32_t> log_count {0};
+	if (log_count.fetch_add(1, std::memory_order_relaxed) < 16) {
+		Log::WriteToConsoleAndLog(fmt::format(
+		    "KYTY_SKIP_CS: skipped {} dispatch of compute shader 0x{:016x} groups={}x{}x{}\n",
+		    indirect ? "indirect" : "direct", hash, x, y, z));
+	}
+	return true;
+}
+
+} // namespace
+
 void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
                                     uint32_t thread_group_x, uint32_t thread_group_y,
                                     uint32_t thread_group_z, uint32_t mode, bool async_compute) {
@@ -352,6 +376,11 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 		compute_program = m_context.GetPipelineCache().GetComputeProgram(cs_regs, sh_regs, input_info);
 	}
 	if (!compute_program) return;
+	if (SkipListedComputeDispatch(input_info, thread_group_x, thread_group_y, thread_group_z,
+	                              false)) {
+		ResetBindings();
+		return;
+	}
 	if (use_thread_dimensions) {
 		input_info.dispatch_threads_num[0]    = thread_group_x;
 		input_info.dispatch_threads_num[1]    = thread_group_y;
@@ -624,6 +653,10 @@ void RenderExecutor::DispatchIndirectThreads(uint64_t submit_id, CommandBuffer& 
 	if (!compute_program) {
 		return;
 	}
+	if (SkipListedComputeDispatch(input_info, 0, 0, 0, true)) {
+		ResetBindings();
+		return;
+	}
 	const auto& program = *input_info.stage.program;
 	EXIT_IF(program.bindings.UsesPushData());
 	// Metadata clears are tracked as in the direct path; it does not depend on the size.
@@ -774,6 +807,10 @@ void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
 		    cs_regs, buffer.GetRegisters().GetShaderRegisters(), input_info);
 	}
 	if (!compute_program) return;
+	if (SkipListedComputeDispatch(input_info, 0, 0, 0, true)) {
+		ResetBindings();
+		return;
+	}
 	buffer.EndRendering();
 	auto& pipeline = m_context.GetPipelineCache().GetComputePipeline(input_info, compute_program);
 	auto& bindings = m_compute_bindings;

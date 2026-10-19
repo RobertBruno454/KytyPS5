@@ -274,8 +274,10 @@ void DefineDescriptors(EmitterState& state) {
 		bindings.dispatch_thread_dword = bindings.memory_offset_dword;
 		bindings.memory_offset_dword += 3u;
 	}
-	bindings.push_data_start_dword =
-	    IR::PushData::StartFor(bindings.push_data_start_dword, bindings.ShaderDataDwords());
+	for (uint32_t resource = 0; resource < info.buffers.size(); ++resource) {
+		bindings.lane_indexed_data |= SharedIndirectBufferResource(state, resource) != UINT32_MAX;
+	}
+	bindings.push_data_start_dword = bindings.PushDataStartFor(bindings.push_data_start_dword);
 	counts[static_cast<size_t>(Kind::ShaderData)] =
 	    bindings.ShaderDataDwords() != 0 && !bindings.UsesPushData();
 	if (state.program.bindings.UsesPushData() || state.program.stage == ShaderType::Mesh ||
@@ -845,7 +847,8 @@ void DefineModule(EmitterState& state) {
 	    state.program.info.subgroup_arithmetic || state.program.info.subgroup_local_invocation_id) {
 		state.builder.RequireCapability(spv::CapabilityGroupNonUniform);
 	}
-	if (state.lane_count == 2 || state.split_wave || state.program.info.subgroup_ballot) {
+	if (state.lane_count == 2 || state.split_wave || state.packed_wave32 ||
+	    state.program.info.subgroup_ballot) {
 		state.builder.RequireCapability(spv::CapabilityGroupNonUniformBallot);
 	}
 	if (state.program.info.subgroup_vote) {
@@ -856,6 +859,9 @@ void DefineModule(EmitterState& state) {
 	}
 	if (state.program.info.subgroup_arithmetic) {
 		state.builder.RequireCapability(spv::CapabilityGroupNonUniformArithmetic);
+		if (state.packed_wave32) {
+			state.builder.RequireCapability(spv::CapabilityGroupNonUniformClustered);
+		}
 	}
 	if (state.program.info.compute_derivatives && state.program.stage == ShaderType::Compute) {
 		state.builder.RequireCapability(spv::CapabilityComputeDerivativeGroupQuadsKHR);
