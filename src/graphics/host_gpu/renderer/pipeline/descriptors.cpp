@@ -798,7 +798,17 @@ void RenderExecutor::FindBuffers(std::span<PreparedBindings* const> stages) {
 							if (read_address > address) {
 								size = std::min(size, read_address - address);
 							} else if (address - read_address < read_size && !own_compute_reads) {
-								EXIT("scalar resource reads overlap a shader buffer write\n");
+								// Some titles (UFC 6 after its tutorial, Saros past the main menu)
+								// bind a sentinel write whose base falls inside another stage's
+								// scalar specialization read. The CPU specialization was captured
+								// before the dispatch, so keep the write and continue.
+								static std::atomic_uint overlap_log_count = 0;
+								if (overlap_log_count.fetch_add(1, std::memory_order_relaxed) < 16) {
+									LOGF("FindBuffers: scalar read [0x%010" PRIx64 " + 0x%" PRIx64
+									     "] overlaps sentinel buffer write base 0x%010" PRIx64
+									     "; keeping write\n",
+									     read_address, read_size, address);
+								}
 							}
 						}
 					}
@@ -1007,7 +1017,15 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 					    linear ? std::min<uint64_t>(written.size, resource.write_extent) : written.size;
 					if (written_size != 0 && ImageRangeOverlaps(address, size,
 					                                          written.address, written_size)) {
-						EXIT("scalar resource reads overlap a shader buffer write\n");
+						// See FindBuffers: the specialization was captured on the CPU before
+						// the dispatch, so log the alias and keep going (UFC 6, Saros).
+						static std::atomic_uint commit_overlap_log_count = 0;
+						if (commit_overlap_log_count.fetch_add(1, std::memory_order_relaxed) < 16) {
+							LOGF("CommitBindings: scalar read [0x%010" PRIx64 " + 0x%" PRIx64
+							     "] overlaps buffer write [0x%010" PRIx64 " + 0x%" PRIx64
+							     "]; continuing\n",
+							     address, size, written.address, written_size);
+						}
 					}
 				}
 			}
