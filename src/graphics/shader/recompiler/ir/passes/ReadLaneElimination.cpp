@@ -176,8 +176,13 @@ public:
 				}
 				prefix = attempt.Unwrap(prefix);
 				if (prefix.IsEmpty()) break;
-				if (attempt.saved_exec.IsEmpty()) return prefix;
 				const auto* seed = attempt.Get(prefix, ValueOpcode::SelectU32);
+				if (attempt.saved_exec.IsEmpty()) {
+					// Literal full EXEC does not prove that a masked seed has a neutral
+					// fallback (#1693).
+					if (seed == nullptr || seed->Arg(2).Resolve() == Value(identity)) return prefix;
+					continue;
+				}
 				if (seed != nullptr && seed->Arg(2).Resolve() == Value(identity)) {
 					const auto  predicate = seed->Arg(0).Resolve();
 					const auto* subset    = attempt.Get(predicate, ValueOpcode::LogicalAnd);
