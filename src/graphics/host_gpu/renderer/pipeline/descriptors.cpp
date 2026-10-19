@@ -2136,13 +2136,13 @@ void RenderExecutor::FindBuffers(std::span<PreparedBindings* const> stages) {
 							}
 						}
 					}
-				} else {
-					const auto& graphics = m_context.GetGraphics();
-					const auto  limit =
-					    uint64_t {graphics.GetPhysicalDeviceProperties().limits.maxStorageBufferRange} -
-					    (graphics.StorageMinAlignment() - 1);
-					requested_size = std::min({requested_size, uint64_t {256} * 1024 * 1024, limit});
 				}
+				// Sentinel ranges of written buffers are clamped too (upstream cd4eab9d6, PPSA15246).
+				const auto& graphics = m_context.GetGraphics();
+				const auto  limit =
+				    uint64_t {graphics.GetPhysicalDeviceProperties().limits.maxStorageBufferRange} -
+				    (graphics.StorageMinAlignment() - 1);
+				requested_size = std::min({requested_size, uint64_t {256} * 1024 * 1024, limit});
 			}
 			uint64_t size = 0;
 			{
