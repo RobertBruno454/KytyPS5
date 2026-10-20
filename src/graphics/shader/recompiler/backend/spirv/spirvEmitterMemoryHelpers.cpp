@@ -211,13 +211,30 @@ void EmitWriteBitmapMark(EmitterState& state, const MemoryResourceAccess& access
 	});
 }
 
+// Stages without a workgroup emulate LDS with one private array per invocation. A GPU keeps
+// hundreds of thousands of invocations in flight, so this size multiplies into driver local memory:
+// a fixed 8192 dwords (32 KB) asked for gigabytes and killed the device (a write fault in the
+// first heavy pixel shader that touched LDS). A pixel shader can only address the LDS that
+// EXTRA_LDS_SIZE reserves, a vertex shader the LDS_SIZE of its GS stage; hardware reads zero and
+// drops writes beyond it, as the bounds checks do.
+constexpr uint32_t FUNCTION_LDS_DWORDS = 1024u;
+
 uint32_t LdsDwordCount(const EmitterState& state) {
-	const auto* workgroup = ShaderWorkgroupInput(state.program.stage, state.input_info);
-	if (workgroup != nullptr) {
+	if (const auto* workgroup = ShaderWorkgroupInput(state.program.stage, state.input_info)) {
 		return workgroup->lds_size_dwords;
 	}
-	return state.requirements.function_lds_dwords != 0 ? state.requirements.function_lds_dwords
-	                                                   : 8192u;
+	// The guest allocation bounds what the stage can address (upstream fa8216c4d); the static
+	// access analysis can bound it further.
+	uint32_t dwords = FUNCTION_LDS_DWORDS;
+	if (state.program.stage == ShaderType::Pixel && state.input_info.pixel != nullptr) {
+		dwords = std::max(state.input_info.pixel->lds_size_dwords, 1u);
+	} else if (state.program.stage == ShaderType::Vertex && state.input_info.vertex != nullptr) {
+		dwords = std::max(state.input_info.vertex->lds_size_dwords, 1u);
+	}
+	if (state.requirements.function_lds_dwords != 0) {
+		dwords = std::min(dwords, state.requirements.function_lds_dwords);
+	}
+	return dwords;
 }
 
 // KYTY_LDS_PAD_DWORDS=<n>, optionally with KYTY_LDS_PAD_HASHES="hash,hash,...": declare the

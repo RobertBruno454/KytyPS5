@@ -793,6 +793,7 @@ void AppendInputKey(ByteWriter& key, const ShaderVertexInputInfo& info) {
 	key.Put<int32_t>(info.fetch_buffer_reg);
 	key.Put(info.wave_size);
 	key.Put(info.scratch_size_dwords);
+	key.Put(info.lds_size_dwords);
 	key.Put(info.pa_cl_vs_out_cntl);
 	key.Put(info.clip_space.enabled);
 	if (info.clip_space.enabled) {
@@ -838,7 +839,8 @@ void AppendInputKey(ByteWriter& key, const ShaderPixelInputInfo& info) {
 	}
 	for (const auto value: {info.wave_size, info.ps_system_input_base, info.custom_interpolation_mask,
 	                        info.ps_perspective_center_vgpr, info.ps_perspective_centroid_vgpr,
-	                        info.target_uint_mask, info.target_sint_mask, info.scratch_size_dwords}) {
+	                        info.target_uint_mask, info.target_sint_mask, info.scratch_size_dwords,
+	                        info.lds_size_dwords}) {
 		key.Put(value);
 	}
 	for (const auto mode: info.target_output_mode) {
