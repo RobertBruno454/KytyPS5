@@ -19,6 +19,7 @@
 #include "graphics/host_gpu/renderer/debug.h"
 #include "graphics/host_gpu/renderer/depthRenderTarget.h"
 #include "graphics/host_gpu/renderer/gpuProfiler.h"
+#include "graphics/host_gpu/renderer/gpuBreadcrumbs.h"
 #include "graphics/host_gpu/renderer/gpuTiming.h"
 #include "graphics/host_gpu/renderer/image/textureCommon.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
@@ -1648,6 +1649,13 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		gpu_zone = GpuProfiler::Begin(m_context, buffer, name, static_cast<size_t>(size), 0x4e79a7);
 		Profiler::CommandZone::Annotate("%s", name);
 	}
+	const auto crumb = GpuBreadcrumbs::Begin(
+	    vk_buffer,
+	    mesh_active              ? GpuBreadcrumbs::Mesh
+	    : vertex_indirect_buffer ? GpuBreadcrumbs::DrawIndirect
+	                             : GpuBreadcrumbs::Draw,
+	    vertex_stages.back().stage.program->shader_hash,
+	    state.ps_active ? state.ps_input_info.stage.program->shader_hash : 0);
 	if (mesh_active) {
 		if (mesh_indirect_buffer) {
 			vk_buffer.drawMeshTasksIndirectEXT(mesh_indirect_buffer, mesh_indirect_offset, 1, 16u);
@@ -1681,6 +1689,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	} else {
 		EmitDrawPrimitives(ucfg, vk_buffer, draw, emit);
 	}
+	GpuBreadcrumbs::End(vk_buffer, crumb);
 	Profiler::Add(Profiler::Counter::Draws);
 	GpuProfiler::End(buffer, gpu_zone);
 	GpuTiming::After(m_context, buffer,

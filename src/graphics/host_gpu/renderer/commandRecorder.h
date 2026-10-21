@@ -337,6 +337,12 @@ public:
 	void setCheckpointNV(const void* marker) const {
 		Run([=](vk::CommandBuffer command) { command.setCheckpointNV(marker); });
 	}
+	void writeBufferMarkerAMD(vk::PipelineStageFlagBits stage, vk::Buffer buffer,
+	                          vk::DeviceSize offset, uint32_t marker) const {
+		Run([=](vk::CommandBuffer command) {
+			command.writeBufferMarkerAMD(stage, buffer, offset, marker);
+		});
+	}
 	void setViewportWithCount(uint32_t count, const vk::Viewport* viewports) const {
 		if (!Threaded()) {
 			m_direct.setViewportWithCount(count, viewports);

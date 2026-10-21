@@ -42,6 +42,10 @@ RecordDiagnosticCheckpoint(const DiagnosticCheckpoint& checkpoint);
 // After a device loss: VK_EXT_device_fault info, the NVIDIA crash dump written to
 // _device_fault.nv-gpudmp, and the queue's last diagnostic checkpoints.
 void DumpDeviceLossDiagnostics(GraphicContext& graphics);
+// KYTY_GPU_BREADCRUMBS=1 (VK_AMD_buffer_marker): every dispatch and draw writes its sequence
+// number to host memory when it starts and when it finishes, so a device loss can name the
+// guest shaders that were still running (AMD has no NVIDIA-style checkpoints).
+void InitGpuBreadcrumbs(GraphicContext& graphics);
 
 struct GraphicContext {
 	vk::Instance                       instance                              = nullptr;
@@ -57,6 +61,7 @@ struct GraphicContext {
 	VmaAllocator                       allocator                             = nullptr;
 	bool                               memory_budget_ext_enabled             = false;
 	bool                               diagnostic_checkpoints_enabled        = false;
+	bool                               buffer_marker_enabled                 = false;
 	// With --profile, for the host GPU timeline (renderer/gpuProfiler).
 	bool                               host_query_reset_enabled              = false;
 	bool                               calibrated_timestamps_enabled         = false;

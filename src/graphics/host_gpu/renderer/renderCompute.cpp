@@ -14,6 +14,7 @@
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/commandRecorder.h"
 #include "graphics/host_gpu/renderer/gpuProfiler.h"
+#include "graphics/host_gpu/renderer/gpuBreadcrumbs.h"
 #include "graphics/host_gpu/renderer/gpuTiming.h"
 #include "graphics/host_gpu/timeline.h"
 #include "graphics/host_gpu/renderer/image/imageInfo.h"
@@ -727,7 +728,10 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 		vk_buffer.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline.pipeline);
 		GpuTiming::Before(m_context, buffer);
 		const auto gpu_zone = BeginGpuZone(m_context, buffer, program.shader_hash);
+		const auto crumb    = GpuBreadcrumbs::Begin(vk_buffer, GpuBreadcrumbs::Dispatch,
+		                                            program.shader_hash, 0);
 		vk_buffer.dispatch(thread_group_x, thread_group_y, thread_group_z);
+		GpuBreadcrumbs::End(vk_buffer, crumb);
 		Profiler::Add(Profiler::Counter::Dispatches);
 		GpuProfiler::End(buffer, gpu_zone);
 		GpuTiming::After(m_context, buffer, program.shader_hash, GpuTiming::Dispatch);
@@ -889,7 +893,10 @@ void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
 		vk_buffer.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline.pipeline);
 		GpuTiming::Before(m_context, buffer);
 		const auto gpu_zone = BeginGpuZone(m_context, buffer, program.shader_hash);
+		const auto crumb    = GpuBreadcrumbs::Begin(vk_buffer, GpuBreadcrumbs::DispatchIndirect,
+		                                            program.shader_hash, 0);
 		vk_buffer.dispatchIndirect(indirect_buffer, indirect_offset);
+		GpuBreadcrumbs::End(vk_buffer, crumb);
 		Profiler::Add(Profiler::Counter::Dispatches);
 		GpuProfiler::End(buffer, gpu_zone);
 		GpuTiming::After(m_context, buffer, program.shader_hash, GpuTiming::Dispatch);

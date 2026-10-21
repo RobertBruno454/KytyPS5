@@ -1251,6 +1251,17 @@ void WindowContext::CreateVulkan() {
 		if (HasExtension(available_extensions, VK_EXT_DEVICE_FAULT_EXTENSION_NAME)) {
 			device_extensions.push_back(VK_EXT_DEVICE_FAULT_EXTENSION_NAME);
 		}
+		// KYTY_GPU_BREADCRUMBS=1: per-command markers that name the shaders a device loss
+		// interrupted (graphicContext.h).
+		if (const char* breadcrumbs = std::getenv("KYTY_GPU_BREADCRUMBS");
+		    breadcrumbs != nullptr && breadcrumbs[0] != '\0' && breadcrumbs[0] != '0') {
+			if (HasExtension(available_extensions, VK_AMD_BUFFER_MARKER_EXTENSION_NAME)) {
+				device_extensions.push_back(VK_AMD_BUFFER_MARKER_EXTENSION_NAME);
+				graphic_ctx.buffer_marker_enabled = true;
+			} else {
+				LOGF("GPU breadcrumbs: VK_AMD_buffer_marker is not available; breadcrumbs off\n");
+			}
+		}
 		if (graphic_ctx.address_binding_messenger != nullptr &&
 		    HasExtension(available_extensions,
 		                 VK_EXT_DEVICE_ADDRESS_BINDING_REPORT_EXTENSION_NAME)) {
@@ -1304,6 +1315,7 @@ void WindowContext::CreateVulkan() {
 	if (!graphic_ctx.CreateAllocator()) {
 		EXIT("Could not create Vulkan memory allocator");
 	}
+	InitGpuBreadcrumbs(graphic_ctx);
 
 	render_context = std::make_unique<RenderContext>(graphic_ctx);
 	LibKernel::Memory::InstallGpuResources(render_context.get());
