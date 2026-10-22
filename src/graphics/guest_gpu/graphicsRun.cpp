@@ -38,6 +38,7 @@
 #include <semaphore>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #ifdef _MSC_VER
@@ -549,6 +550,12 @@ T GuestGpu::ReadLabel(const volatile T* address) const {
 template uint32_t GuestGpu::ReadLabel<uint32_t>(const volatile uint32_t*) const;
 template uint64_t GuestGpu::ReadLabel<uint64_t>(const volatile uint64_t*) const;
 
+void GuestGpu::Wake() {
+	Common::LockGuard lock(m_queue_mutex);
+	m_wake_pending = true;
+	m_work_available.Signal();
+}
+
 void GuestGpu::ProcessCommands() {
 	EXIT_IF(!IsGpuThread());
 	while (m_pending_commands.load(std::memory_order_acquire) != 0) {
@@ -1002,7 +1009,10 @@ void GuestGpu::ThreadRun(void* data) {
 					gpu->m_processing = false;
 					Timeline::Mark("gpu-blocked");
 					const auto blocked_start = breakdown ? GpuBreakdown::Now() : 0;
-					gpu->m_work_available.WaitFor(&gpu->m_queue_mutex, 100);
+					// A wake that came before this wait must not be lost.
+					if (!std::exchange(gpu->m_wake_pending, false)) {
+						gpu->m_work_available.WaitFor(&gpu->m_queue_mutex, 100);
+					}
 					if (breakdown) {
 						GpuBreakdown::Get().Add(GpuBreakdown::Blocked, GpuBreakdown::Now() - blocked_start);
 						GpuBreakdown::Get().CountBlockedWait();
@@ -1755,10 +1765,11 @@ void CommandProcessor::DrawIndexAuto(DrawAutoArgs args) {
 }
 
 void CommandProcessor::WaitFlipDone(uint32_t video_out_handle, uint32_t display_buffer_index) {
-	BufferFlush();
-
-	m_renderer.GetVideoOut().WaitFlipDone(static_cast<int>(video_out_handle),
-	                                      static_cast<int>(display_buffer_index));
+	// The SDK stalls only this command processor, not the host command lane or other queues.
+	if (!m_renderer.GetVideoOut().IsSafeForRendering(static_cast<int>(video_out_handle),
+	                                                 static_cast<int>(display_buffer_index))) {
+		SuspendPm4();
+	}
 }
 
 template <typename T>

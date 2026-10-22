@@ -35,6 +35,8 @@ public:
 	// Like SendCommand, but false instead of exiting once the GPU no longer accepts commands.
 	bool               TrySendCommand(Common::UniqueFunction<void>&& command);
 	void               SendCommandSync(Common::UniqueFunction<void>&& command);
+	// Retries blocked submissions now instead of after the 100 ms stall timeout.
+	void               Wake();
 
 	// End-of-pipe labels (RELEASE_MEM without an interrupt) become visible to the CPU once the
 	// host GPU has executed the work recorded before them, as on hardware, instead of when the
@@ -124,6 +126,7 @@ private:
 	bool                                           m_processing        = false;
 	bool                                           m_accepting         = true;
 	bool                                           m_stopping          = false;
+	bool                                           m_wake_pending      = false;
 	bool                                           m_shutdown_complete = false;
 	// Completion callbacks can outlive GuestGpu during renderer shutdown.
 	std::shared_ptr<std::binary_semaphore> m_suspend_point_ready =
