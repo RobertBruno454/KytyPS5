@@ -10,6 +10,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+#include <string_view>
+#include <vector>
 
 namespace Libs::Graphics::GpuBreadcrumbs {
 
@@ -162,3 +164,38 @@ void Dump() {
 }
 
 } // namespace Libs::Graphics::GpuBreadcrumbs
+
+namespace Libs::Graphics::ShaderSkip {
+
+bool Requested(uint64_t shader_hash) {
+	static const std::vector<uint64_t> hashes = [] {
+		std::vector<uint64_t> result;
+		const char*           value = std::getenv("KYTY_SKIP_SHADER_HASHES");
+		if (value == nullptr) {
+			return result;
+		}
+		const std::string_view list(value);
+		size_t                 start = 0;
+		while (start < list.size()) {
+			const auto end = std::min(list.find(',', start), list.size());
+			if (end > start) {
+				const auto hash =
+				    std::strtoull(std::string(list.substr(start, end - start)).c_str(), nullptr, 16);
+				if (hash != 0) {
+					result.push_back(hash);
+					char text[96];
+					std::snprintf(text, sizeof(text),
+					              "ShaderSkip: skipping the draws and dispatches of shader "
+					              "0x%016" PRIx64 "\n",
+					              hash);
+					Log::WriteToConsoleAndLog(text);
+				}
+			}
+			start = end + 1;
+		}
+		return result;
+	}();
+	return !hashes.empty() && std::find(hashes.begin(), hashes.end(), shader_hash) != hashes.end();
+}
+
+} // namespace Libs::Graphics::ShaderSkip
