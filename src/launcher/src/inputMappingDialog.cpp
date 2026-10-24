@@ -19,28 +19,15 @@
 #include <QScreen>
 #include <QScrollArea>
 #include <QSet>
-#include <QSpinBox>
 #include <QStringList>
 #include <QTabWidget>
 #include <QVBoxLayout>
 
-#include <algorithm>
-#include <cmath>
-#include <iterator>
-
 namespace {
 
 constexpr auto DEFAULT_MOUSE_SENSITIVITY = 1.0;
-constexpr auto DEFAULT_MOUSE_DEADZONE    = 20;
-constexpr char MOUSE_SENSITIVITY[]       = "MouseSensitivity";
-constexpr char MOUSE_SENSITIVITY_Y[]     = "MouseSensitivityY";
-constexpr char MOUSE_DEADZONE[]          = "MouseDeadzone";
-constexpr char MOUSE_INVERT_Y[]          = "MouseInvertY";
-constexpr char MOUSE_AUTO_CAPTURE[]      = "MouseAutoCapture";
+constexpr char MOUSE_SENSITIVITY[]       = "MouseSensitivity=";
 constexpr char TOUCH_PARTICLE_SKIN[]     = "TouchParticleSkin=";
-
-constexpr const char* MOUSE_SETTINGS[] = {MOUSE_SENSITIVITY, MOUSE_SENSITIVITY_Y, MOUSE_DEADZONE,
-                                          MOUSE_INVERT_Y, MOUSE_AUTO_CAPTURE};
 constexpr char TOUCH_CURSOR_OFF[]        = "TouchCursorImage=Off";
 constexpr char KEYBOARD_DISABLED[]       = "Keyboard=Disabled";
 constexpr char PAD_DISABLED[]            = "Pad=Disabled";
@@ -324,23 +311,18 @@ void AssignBinding(QHash<QString, QString>& bindings, const QString& id, const Q
 	bindings.insert(id, binding);
 }
 
-bool IsMouseSetting(const QString& name) {
-	return std::any_of(std::begin(MOUSE_SETTINGS), std::end(MOUSE_SETTINGS),
-	                   [&name](const char* setting) { return name == QLatin1String(setting); });
-}
-
 QHash<QString, QString> ParseMapping(const QStringList& mapping) {
 	QHash<QString, QString> result;
 	for (const auto& entry: mapping) {
 		if (entry == QLatin1String(KEYBOARD_DISABLED) || entry == QLatin1String(PAD_DISABLED) ||
+		    entry.startsWith(QLatin1String(MOUSE_SENSITIVITY)) ||
 		    entry.startsWith(QLatin1String(TOUCH_PARTICLE_SKIN)) ||
 		    entry.startsWith(QLatin1String("TouchCursorImage=")) ||
 		    entry.startsWith(QLatin1String(PAD_PREFIX))) {
 			continue;
 		}
 		const auto separator = entry.indexOf(QLatin1Char('='));
-		if (separator > 0 && separator + 1 < entry.size() &&
-		    !IsMouseSetting(entry.left(separator))) {
+		if (separator > 0 && separator + 1 < entry.size()) {
 			AssignBinding(result, entry.left(separator), entry.mid(separator + 1));
 		}
 	}
@@ -356,36 +338,13 @@ QString ParseTouchParticleSkin(const QStringList& mapping) {
 	return QStringLiteral("Classic");
 }
 
-QString MouseSetting(const QStringList& mapping, const char* name) {
-	const auto prefix = QLatin1String(name) + QLatin1Char('=');
+double ParseMouseSensitivity(const QStringList& mapping) {
 	for (const auto& entry: mapping) {
-		if (entry.startsWith(prefix)) {
-			return entry.mid(prefix.size());
+		if (entry.startsWith(QLatin1String(MOUSE_SENSITIVITY))) {
+			return entry.mid(sizeof(MOUSE_SENSITIVITY) - 1).toDouble();
 		}
 	}
-	return {};
-}
-
-double ParseMouseValue(const QStringList& mapping, const char* name, double fallback) {
-	bool       ok    = false;
-	const auto value = MouseSetting(mapping, name).toDouble(&ok);
-	return ok ? value : fallback;
-}
-
-bool ParseMouseFlag(const QStringList& mapping, const char* name) {
-	const auto value = MouseSetting(mapping, name);
-	return value == QLatin1String("1") || value == QLatin1String("true");
-}
-
-QDoubleSpinBox* CreateSensitivitySpin(QWidget* parent, const QString& object_name) {
-	auto* spin = new QDoubleSpinBox(parent);
-	spin->setObjectName(object_name);
-	spin->setRange(0.1, 5.0);
-	spin->setSingleStep(0.1);
-	spin->setDecimals(1);
-	spin->setSuffix(QStringLiteral("×"));
-	spin->setValue(DEFAULT_MOUSE_SENSITIVITY);
-	return spin;
+	return DEFAULT_MOUSE_SENSITIVITY;
 }
 
 } // namespace
@@ -429,14 +388,7 @@ InputMappingDialog::InputMappingDialog(const QStringList& mapping, ControllerPre
 	m_tabs->addTab(BuildTab(true), tr("Gamepad"));
 	m_tabs->addTab(BuildTab(false), tr("Keyboard && Mouse"));
 	layout->addWidget(m_tabs, 1);
-	const auto sensitivity_x =
-	    ParseMouseValue(mapping, MOUSE_SENSITIVITY, DEFAULT_MOUSE_SENSITIVITY);
-	m_sensitivity->setValue(sensitivity_x);
-	m_sensitivity_y->setValue(ParseMouseValue(mapping, MOUSE_SENSITIVITY_Y, sensitivity_x));
-	m_deadzone->setValue(static_cast<int>(std::lround(
-	    ParseMouseValue(mapping, MOUSE_DEADZONE, DEFAULT_MOUSE_DEADZONE / 100.0) * 100.0)));
-	m_invert_y->setChecked(ParseMouseFlag(mapping, MOUSE_INVERT_Y));
-	m_auto_capture->setChecked(ParseMouseFlag(mapping, MOUSE_AUTO_CAPTURE));
+	m_sensitivity->setValue(ParseMouseSensitivity(mapping));
 
 	auto* touch_group  = new QGroupBox(tr("Emulated touch pad (shared by both tabs)"), this);
 	auto* touch_layout = new QHBoxLayout(touch_group);
@@ -598,41 +550,20 @@ QWidget* InputMappingDialog::BuildTab(bool pad) {
 		note->setWordWrap(true);
 		layout->addWidget(note);
 	} else {
-		auto* mouse_group  = new QGroupBox(tr("Mouse camera (right stick)"), page);
-		auto* mouse_layout = new QGridLayout(mouse_group);
-		m_sensitivity      = CreateSensitivitySpin(mouse_group, QStringLiteral("mouseSensitivity"));
-		m_sensitivity_y = CreateSensitivitySpin(mouse_group, QStringLiteral("mouseSensitivityY"));
-		m_deadzone      = new QSpinBox(mouse_group);
-		m_deadzone->setObjectName(QStringLiteral("mouseDeadzone"));
-		m_deadzone->setRange(0, 90);
-		m_deadzone->setSingleStep(5);
-		m_deadzone->setSuffix(QStringLiteral("%"));
-		m_deadzone->setValue(DEFAULT_MOUSE_DEADZONE);
-		m_deadzone->setToolTip(tr("Smallest stick push the mouse makes. Raise it if slow mouse "
-		                          "movement does not turn the camera; lower it if the camera "
-		                          "drifts too fast at low speed."));
-		m_invert_y = new QCheckBox(tr("Invert vertical"), mouse_group);
-		m_invert_y->setObjectName(QStringLiteral("mouseInvertY"));
-		m_auto_capture = new QCheckBox(tr("Capture the mouse when the game starts"), mouse_group);
-		m_auto_capture->setObjectName(QStringLiteral("mouseAutoCapture"));
-		mouse_layout->addWidget(new QLabel(tr("Horizontal sensitivity"), mouse_group), 0, 0);
-		mouse_layout->addWidget(m_sensitivity, 0, 1);
-		mouse_layout->addWidget(new QLabel(tr("Vertical sensitivity"), mouse_group), 0, 2);
-		mouse_layout->addWidget(m_sensitivity_y, 0, 3);
-		mouse_layout->addWidget(new QLabel(tr("Minimum stick push"), mouse_group), 0, 4);
-		mouse_layout->addWidget(m_deadzone, 0, 5);
-		mouse_layout->addWidget(m_invert_y, 1, 0, 1, 2);
-		mouse_layout->addWidget(m_auto_capture, 1, 2, 1, 4);
-		auto* mouse_hint = new QLabel(
-		    tr("F7 in-game captures or releases the mouse. While it is captured the default "
-		       "layout moves to the left hand: Space Cross, C/Ctrl Circle, R Square, F Triangle, "
-		       "V R3, 1-4 D-pad, Esc Options; left click R2, right click L2, middle click R3. "
-		       "Custom bindings are used as they are."),
-		    mouse_group);
-		mouse_hint->setWordWrap(true);
-		mouse_layout->addWidget(mouse_hint, 2, 0, 1, 7);
-		mouse_layout->setColumnStretch(6, 1);
-		layout->addWidget(mouse_group);
+		auto* sensitivity_layout = new QHBoxLayout;
+		sensitivity_layout->addWidget(new QLabel(tr("Mouse sensitivity"), page));
+		m_sensitivity = new QDoubleSpinBox(page);
+		m_sensitivity->setObjectName(QStringLiteral("mouseSensitivity"));
+		m_sensitivity->setRange(0.1, 5.0);
+		m_sensitivity->setSingleStep(0.1);
+		m_sensitivity->setDecimals(1);
+		m_sensitivity->setSuffix(QStringLiteral("×"));
+		m_sensitivity->setValue(DEFAULT_MOUSE_SENSITIVITY);
+		sensitivity_layout->addWidget(m_sensitivity);
+		sensitivity_layout->addWidget(
+		    new QLabel(tr("F7 in-game toggles mouse movement on the right stick."), page));
+		sensitivity_layout->addStretch();
+		layout->addLayout(sensitivity_layout);
 
 	}
 	return page;
@@ -665,24 +596,9 @@ QStringList InputMappingDialog::Mapping() const {
 			result.append(QLatin1String(PAD_DISABLED));
 		}
 	}
-	const auto append_setting = [&result](const char* name, const QString& value) {
-		result.append(QLatin1String(name) + QLatin1Char('=') + value);
-	};
 	if (m_sensitivity->value() != DEFAULT_MOUSE_SENSITIVITY) {
-		append_setting(MOUSE_SENSITIVITY, QString::number(m_sensitivity->value(), 'f', 1));
-	}
-	// The emulator uses the horizontal sensitivity for both axes unless told otherwise.
-	if (m_sensitivity_y->value() != m_sensitivity->value()) {
-		append_setting(MOUSE_SENSITIVITY_Y, QString::number(m_sensitivity_y->value(), 'f', 1));
-	}
-	if (m_deadzone->value() != DEFAULT_MOUSE_DEADZONE) {
-		append_setting(MOUSE_DEADZONE, QString::number(m_deadzone->value() / 100.0, 'f', 2));
-	}
-	if (m_invert_y->isChecked()) {
-		append_setting(MOUSE_INVERT_Y, QStringLiteral("1"));
-	}
-	if (m_auto_capture->isChecked()) {
-		append_setting(MOUSE_AUTO_CAPTURE, QStringLiteral("1"));
+		result.append(QLatin1String(MOUSE_SENSITIVITY) +
+		              QString::number(m_sensitivity->value(), 'f', 1));
 	}
 	const auto skin = m_particle_skin->currentData().toString();
 	if (skin != QLatin1String("Classic")) {
@@ -756,10 +672,6 @@ void InputMappingDialog::RestoreDefaults() {
 			}
 		}
 		m_sensitivity->setValue(DEFAULT_MOUSE_SENSITIVITY);
-		m_sensitivity_y->setValue(DEFAULT_MOUSE_SENSITIVITY);
-		m_deadzone->setValue(DEFAULT_MOUSE_DEADZONE);
-		m_invert_y->setChecked(false);
-		m_auto_capture->setChecked(false);
 		m_custom_bindings = false;
 	}
 	UpdateButtons();
