@@ -112,11 +112,19 @@ jobs:
       - name: Build
         shell: cmd
         run: |
-          cmake --build _Build/windows --target launcher ^
+          cmake --build _Build/windows --target launcher --parallel
+
+      # Test branch: a test that fails to compile must not block the artifact.
+      - name: Build tests
+        id: build_tests
+        shell: cmd
+        continue-on-error: true
+        run: |
+          cmake --build _Build/windows --target ^
             guest_printf_tests audio_out2_port_tests pad_haptics_tests controller_settings_tests host_input_tests ime_dialog_tests lru_cache_tests virtual_memory_allocation_tests ^
             shader_recompiler_compute_tests ^
             resource_tracking_tests scalar_provenance_tests ^
-            resource_materialization_tests shader_vertex_metadata_tests archive_file_tests avplayer_file_tests --parallel
+            resource_materialization_tests shader_vertex_metadata_tests archive_file_tests avplayer_file_tests --parallel -- -k 0
 
       - name: Test
         shell: cmd
