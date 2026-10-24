@@ -162,6 +162,7 @@ private:
 	void PrepareImageCopy(Image& image);
 	void RefreshCopySource(ImageId id);
 	[[nodiscard]] bool CopyD16(Image& destination, Image& source);
+	[[nodiscard]] bool CopyDepthPrecision(Image& destination, Image& source);
 	void               CopyImage(ImageId destination, ImageId source);
 	void                  CopyStencil(ImageId destination, ImageId source);
 	[[nodiscard]] ImageId AssociateStencil(ImageId depth, GuestRange stencil);
