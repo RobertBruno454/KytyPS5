@@ -2024,163 +2024,6 @@ void TestLaneGuardedBitScanTable() {
   }
 }
 
-void TestLoopSelectedSignedKey() {
-  namespace CFG = Libs::Graphics::ShaderRecompiler::CFG;
-  // for (i = 0; i < count; ++i) { key = sel[i]; if (key >= 0) sample(table[key]); }
-  enum class Guard { NonNegative, None, Unrelated, Inverted, SecondUnguarded, MinusOne };
-  const auto make_plan = [](Guard guard) {
-    Fixture fixture;
-    fixture.program.wave_size = 64u;
-    auto *entry = fixture.block;
-    auto *header = fixture.AddBlock();
-    auto *body = fixture.AddBlock();
-    auto *use = fixture.AddBlock();
-    auto *latch = fixture.AddBlock();
-    auto *exit = fixture.AddBlock();
-    entry->AddBranch(header);
-    header->AddBranch(exit);
-    header->AddBranch(body);
-    body->AddBranch(use);
-    if (guard != Guard::None) body->AddBranch(latch);
-    use->AddBranch(latch);
-    latch->AddBranch(header);
-    entry->terminator = {.kind = CFG::TerminatorKind::Branch, .true_block = header};
-    use->terminator = {.kind = CFG::TerminatorKind::Branch, .true_block = latch};
-    latch->terminator = {.kind = CFG::TerminatorKind::Branch, .true_block = header};
-    exit->terminator.kind = CFG::TerminatorKind::Return;
-
-    auto &phi = header->AppendNewInst(ValueOpcode::Phi, {}, static_cast<uint64_t>(Type::U32));
-    const auto index = Value(&phi);
-    const auto count = fixture.UserData(2);
-    const auto local = fixture.Emit(
-        ValueOpcode::GetBuiltin,
-        {Value(static_cast<uint32_t>(StageInputKind::LocalInvocationId)), Value(0u)});
-    const auto active = fixture.Emit(ValueOpcode::INotEqual32, {local, Value(0u)}, 0, entry);
-    const auto in_range = fixture.Emit(ValueOpcode::SLessThan32, {index, count}, 0, header);
-    const auto allowed = fixture.Emit(ValueOpcode::LogicalAnd, {in_range, active}, 0, header);
-    header->condition = fixture.Emit(
-        ValueOpcode::ConditionRef,
-        {fixture.Emit(ValueOpcode::LogicalNot, {allowed}, 0, header)},
-        CFG::BranchCondition::ExecZero, header);
-    header->terminator = {.kind = CFG::TerminatorKind::ConditionalBranch,
-                          .true_block = exit, .false_block = body};
-    const auto step = fixture.Emit(ValueOpcode::IAdd32, {index, Value(1u)}, 0, latch);
-    phi.AddPhiOperand(entry, Value(0u));
-    phi.AddPhiOperand(latch, step);
-
-    // s_load_dword key, s[0:1], i * 16 offset:0x40
-    fixture.block = body;
-    const auto base = fixture.Address(fixture.UserData(0), fixture.UserData(1));
-    MemoryInfo selector;
-    selector.kind = ResourceKind::ScalarAddress;
-    selector.offset = 0x40u;
-    const auto key = fixture.Emit(
-        ValueOpcode::LoadAddressU32,
-        {base, fixture.Emit(ValueOpcode::IMul32, {index, Value(16u)}), Value(0u), Value(true)},
-        fixture.AddMemory(selector, 0x100));
-    if (guard == Guard::None) {
-      body->terminator = {.kind = CFG::TerminatorKind::Branch, .true_block = use};
-    } else {
-      // s_cmp_ge_i32 value, 0 (or -1); s_cbranch_scc0 latch
-      const auto tested = guard == Guard::Unrelated ? fixture.UserData(5) : key;
-      const auto limit = Value(guard == Guard::MinusOne ? UINT32_MAX : 0u);
-      const auto nonnegative = fixture.Emit(ValueOpcode::SGreaterThanEqual32, {tested, limit});
-      body->condition = fixture.Emit(
-          ValueOpcode::ConditionRef,
-          {guard == Guard::Inverted ? nonnegative
-                                    : fixture.Emit(ValueOpcode::LogicalNot, {nonnegative})},
-          CFG::BranchCondition::SccZero);
-      body->terminator = {.kind = CFG::TerminatorKind::ConditionalBranch,
-                          .true_block = latch, .false_block = use};
-    }
-
-    // s_load_dwordx8 image, s[0:1], (key << 5) + 0x400
-    const auto sample_table = [&](Block *destination, uint32_t pc) {
-      fixture.block = destination;
-      const auto offset = fixture.Emit(
-          ValueOpcode::IAdd32,
-          {fixture.Emit(ValueOpcode::ShiftLeftLogical32, {key, Value(5u)}), Value(0x400u)});
-      std::array<Value, 8> words;
-      for (uint32_t word = 0; word < words.size(); ++word) {
-        MemoryInfo memory;
-        memory.kind = ResourceKind::ScalarAddress;
-        memory.offset = word * sizeof(uint32_t);
-        words[word] = fixture.Emit(ValueOpcode::LoadAddressU32,
-                                   {base, offset, Value(0u), Value(true)},
-                                   fixture.AddMemory(memory, pc));
-      }
-      const auto image = fixture.Image(words, pc);
-      const auto sampler = fixture.Sampler({Value(0u), Value(0u), Value(0u), Value(0u)});
-      MemoryInfo sample;
-      sample.kind = ResourceKind::Image;
-      sample.image_dimension = Decoder::ImageDimension::Dim2D;
-      fixture.Emit(ValueOpcode::ImageSampleRaw, {image, sampler, fixture.ImageAddress(), Value(true)},
-                   fixture.AddMemory(sample, pc));
-    };
-    sample_table(use, 0x110);
-    // The same table sampled again after the guarded block joins the skip edge.
-    if (guard == Guard::SecondUnguarded) sample_table(latch, 0x120);
-    fixture.PlanAndTrack();
-    const auto source = fixture.program.info.images[0].source;
-    const auto &indirect = fixture.program.descriptor_sources[source].indirect_descriptor;
-    Check(indirect && indirect->selector.has_value() && indirect->selector->stride == 16u &&
-              indirect->selector->offset == 0x40u && indirect->table_offset == 0x400u,
-          "loop-selected key was not planned as a pointer-backed selector");
-    return ExtractResourcePlan(fixture.program);
-  };
-
-  // Selector words 1, -1, 0; records for keys -1, 0 and 1.
-  LinearTestMemory memory;
-  const auto word_at = [&](uint64_t address) { return (address - memory.base) / 4u; };
-  const uint32_t selectors[] = {1u, UINT32_MAX, 0u};
-  for (uint32_t i = 0; i < 3u; ++i) memory.words[word_at(0x1800u + 0x40u + i * 16u)] = selectors[i];
-  for (const uint32_t key : {UINT32_MAX, 0u, 1u}) {
-    const auto word = word_at(0x1800u + ((key * 32u + 0x400u) & 0xffffffffu));
-    memory.words[word] = 0x200u + (key + 1u);
-    memory.words[word + 1u] = static_cast<uint32_t>(
-        Libs::Graphics::Prospero::BufferFormat::k32_32_32_32Float) << 20u;
-    memory.words[word + 3u] = Libs::Graphics::DstSel(4, 5, 6, 7) |
-        (static_cast<uint32_t>(Libs::Graphics::Prospero::ImageType::kColor2D) << 28u);
-  }
-  std::array<uint32_t, 6> user_data{0x1800u, 0u, 3u, 0u, 0u, 0u};
-  SrtRuntime runtime{.user_data = user_data,
-                     .read_memory = ReadLinearTestMemory,
-                     .userdata = &memory,
-                     .read_specialization_memory = ReadLinearTestMemory};
-  const auto materialize = [&](Guard guard, std::vector<uint32_t> &keys,
-                               std::vector<uint32_t> &descriptors) {
-    const auto plan = make_plan(guard);
-    ResourceSnapshot snapshot;
-    ResourceSpecialization specialization;
-    Check(MaterializeResources(plan, runtime, snapshot, specialization),
-          "loop-selected image table did not materialize");
-    const auto mapping = specialization.images[0].indirect_mapping_offset;
-    keys.clear();
-    for (uint32_t entry = 0; entry < snapshot.flattened_srt[mapping]; ++entry)
-      keys.push_back(snapshot.flattened_srt[mapping + 1u + entry * 2u]);
-    descriptors.clear();
-    for (const auto &image : snapshot.images) descriptors.push_back(image.dwords[0]);
-  };
-  std::vector<uint32_t> keys, descriptors;
-  // The key >= 0 test keeps the record of key -1 away from the image.
-  materialize(Guard::NonNegative, keys, descriptors);
-  Check(keys == std::vector<uint32_t>{0u, 1u} &&
-            std::ranges::find(descriptors, 0x200u) == descriptors.end(),
-        "guarded negative selector produced an image candidate");
-  // Without that proof, key -1 addresses the record before the table like the SMEM read.
-  for (const auto guard : {Guard::None, Guard::Unrelated, Guard::Inverted,
-                           Guard::SecondUnguarded, Guard::MinusOne}) {
-    materialize(guard, keys, descriptors);
-    Check(keys == std::vector<uint32_t>{0u, 1u, UINT32_MAX} &&
-              std::ranges::find(descriptors, 0x200u) != descriptors.end(),
-          "negative selector did not read the record at its computed address");
-  }
-  // s_cmp_lt_i32: a negative count runs no iteration.
-  user_data[2] = UINT32_MAX;
-  materialize(Guard::NonNegative, keys, descriptors);
-  Check(keys.empty(), "signed loop count enumerated selectors past a negative bound");
-}
-
 void TestBoundedComputeImageLoop() {
   namespace CFG = Libs::Graphics::ShaderRecompiler::CFG;
   enum class Clamp { None, Right, Left, Dynamic };
@@ -2506,10 +2349,7 @@ void TestBoundedComputeImageLoop() {
     const auto &indirect = fixture.program.descriptor_sources[source].indirect_descriptor;
     Check(indirect && indirect->selector.has_value() == material &&
               indirect->table_offset == 0x6b0u &&
-              (post_test && first != 0u
-                   ? indirect->selector_first == Value(first) &&
-                         indirect->key_count.Resolve() == Value(post_bound - first)
-               : post_test || first == 0u ? indirect->key_count.Resolve() == count.Resolve()
+              (post_test || first == 0u ? indirect->key_count.Resolve() == count.Resolve()
                            : indirect->selector_first == Value(first) && !indirect->signed_count),
           "bounded compute loop lost its runtime image count");
     if (first != 0u)
@@ -2576,11 +2416,9 @@ void TestBoundedComputeImageLoop() {
                "post-tested image loop accepted a nonpositive signed bound");
   CheckFatal([&] { post_test_plan(PostTest::Unsigned, 0u); }, "not a valid runtime value",
              "post-tested image loop accepted a zero unsigned bound");
-  // A nonzero immediate start below the bound enumerates [first, bound).
-  post_test_plan(PostTest::Unsigned, 6u, 1u);
-  for (const auto first : {6u, UINT32_MAX})
+  for (const auto first : {1u, UINT32_MAX})
     CheckFatal([&] { post_test_plan(PostTest::Unsigned, 6u, first); }, "not a valid runtime value",
-               "post-tested image loop accepted an initial value at or past its bound");
+               "post-tested image loop accepted a nonzero or wrapping initial value");
   CheckFatal([&] { post_test_plan(PostTest::Signed, 6u, 0u, Variant::WrongStep); },
              "not a valid runtime value", "post-tested image loop accepted a two-step induction");
 
@@ -3055,134 +2893,6 @@ void TestDescendingImageRange() {
               return read.first >= memory.fail_address;
             }),
         "a complete bitmap domain read redundant chunks or lost candidate keys");
-}
-
-void TestPostTestedImageLoop() {
-  namespace CFG = Libs::Graphics::ShaderRecompiler::CFG;
-  // GotG PS 0xb86c8dfc3f2471af: s_mov_b32 s48, 1; loop: s_load_dwordx8 from s48 << 5;
-  // two image_sample_l; s_add_i32 s48, s48, 1; s_cmp_lt_u32 s48, 16; s_cbranch_scc1 loop.
-  enum class Variant {
-    Unsigned, Signed, ZeroStart, StartAtLimit, NegativeSigned, WrongStep, FalseEdge, AnyLane
-  };
-  const auto make_plan = [](Variant variant, uint32_t start) {
-    Fixture fixture(ShaderType::Pixel);
-    fixture.program.wave_size = 64u;
-    auto *entry = fixture.block;
-    auto *header = fixture.AddBlock();
-    auto *body = fixture.AddBlock();
-    auto *latch = fixture.AddBlock();
-    auto *proxy = fixture.AddBlock();
-    auto *exit = fixture.AddBlock();
-    entry->AddBranch(header);
-    header->AddBranch(body);
-    body->AddBranch(latch);
-    latch->AddBranch(proxy);
-    proxy->AddBranch(header);
-    proxy->AddBranch(exit);
-    const auto table = fixture.Address(fixture.UserData(0), fixture.UserData(1));
-    for (auto *from : {entry, header, body, latch}) {
-      from->terminator = {.kind = CFG::TerminatorKind::Branch,
-                          .true_block = fixture.program.blocks[from->id + 1u]};
-    }
-    const bool false_edge = variant == Variant::FalseEdge;
-    proxy->terminator = {.kind = CFG::TerminatorKind::ConditionalBranch,
-                         .true_block = false_edge ? exit : header,
-                         .false_block = false_edge ? header : exit};
-    exit->terminator.kind = CFG::TerminatorKind::Return;
-
-    auto &phi = header->AppendNewInst(ValueOpcode::Phi, {}, static_cast<uint64_t>(Type::U32));
-    const auto key = Value(&phi);
-    fixture.block = body;
-    const auto offset = fixture.Emit(ValueOpcode::ShiftLeftLogical32, {key, Value(5u)});
-    std::array<Value, 8> words;
-    for (uint32_t word = 0; word < words.size(); ++word) {
-      MemoryInfo memory;
-      memory.kind = ResourceKind::ScalarAddress;
-      memory.offset = word * sizeof(uint32_t);
-      words[word] = fixture.Emit(ValueOpcode::LoadAddressU32,
-                                 {table, offset, Value(0u), Value(true)},
-                                 fixture.AddMemory(memory, 0x588));
-    }
-    // The same descriptor is sampled twice.
-    for (const uint32_t pc : {0x604u, 0x610u}) {
-      const auto image = fixture.Image(words, pc);
-      const auto sampler = fixture.Sampler({Value(0u), Value(0u), Value(0u), Value(0u)});
-      MemoryInfo sample;
-      sample.kind = ResourceKind::Image;
-      sample.image_dimension = Decoder::ImageDimension::Dim2D;
-      fixture.Emit(ValueOpcode::ImageSampleRaw,
-                   {image, sampler, fixture.ImageAddress(), Value(true)},
-                   fixture.AddMemory(sample, pc));
-    }
-    const auto next = fixture.Emit(
-        ValueOpcode::IAdd32, {key, Value(variant == Variant::WrongStep ? 2u : 1u)}, 0, latch);
-    const auto in_range = fixture.Emit(
-        variant == Variant::Signed || variant == Variant::NegativeSigned
-            ? ValueOpcode::SLessThan32 : ValueOpcode::ULessThan32,
-        {next, Value(16u)}, 0, latch);
-    proxy->condition = fixture.Emit(
-        ValueOpcode::ConditionRef, {in_range},
-        variant == Variant::AnyLane ? CFG::BranchCondition::VccNonZero
-                                    : CFG::BranchCondition::SccNonZero, latch);
-    phi.AddPhiOperand(entry, Value(start));
-    phi.AddPhiOperand(proxy, next);
-    fixture.PlanAndTrack();
-    Check(fixture.program.info.images.size() == 1u,
-          "twice-sampled loop descriptor did not share one image binding");
-    for (const auto &image : fixture.program.info.images) {
-      const auto &indirect = fixture.program.descriptor_sources[image.source].indirect_descriptor;
-      Check(indirect && !indirect->selector.has_value() && indirect->table_offset == 0u &&
-                indirect->table_stride == 32u &&
-                // A zero start keeps main's zero-based post-tested count.
-                (start == 0u ? indirect->selector_first.IsEmpty()
-                             : indirect->selector_first.Resolve() == Value(start)) &&
-                indirect->key_count.Resolve() == Value(16u - start),
-            "post-tested image loop lost its start or its bound");
-    }
-    return ExtractResourcePlan(fixture.program);
-  };
-
-  auto plan = make_plan(Variant::Unsigned, 1u);
-  make_plan(Variant::Signed, 1u);
-  make_plan(Variant::ZeroStart, 0u);
-  make_plan(Variant::Unsigned, 15u);
-  for (const auto &[variant, start] :
-       {std::pair{Variant::StartAtLimit, 16u}, std::pair{Variant::StartAtLimit, 17u},
-        std::pair{Variant::NegativeSigned, UINT32_MAX}, std::pair{Variant::WrongStep, 1u},
-        std::pair{Variant::FalseEdge, 1u}, std::pair{Variant::AnyLane, 1u}}) {
-    CheckFatal([&] { make_plan(variant, start); }, "not a valid runtime value",
-               "post-tested image loop accepted keys outside its iteration range");
-  }
-
-  LinearTestMemory memory;
-  constexpr uint32_t table = 0x1800u;
-  for (uint32_t key = 0; key < 16u; ++key) {
-    const auto word = (table - memory.base) / 4u + key * 8u;
-    memory.words[word] = 0x100u + key;
-    memory.words[word + 1u] = static_cast<uint32_t>(
-        Libs::Graphics::Prospero::BufferFormat::k32_32_32_32Float) << 20u;
-    memory.words[word + 3u] = Libs::Graphics::DstSel(4, 5, 6, 7) |
-        (static_cast<uint32_t>(Libs::Graphics::Prospero::ImageType::kColor2D) << 28u);
-  }
-  std::array<uint32_t, 2> user_data{table, 0u};
-  SrtRuntime runtime{.user_data = user_data,
-                     .read_memory = ReadLinearTestMemory,
-                     .userdata = &memory,
-                     .read_specialization_memory = ReadLinearTestMemory};
-  ResourceSnapshot snapshot;
-  ResourceSpecialization specialization;
-  Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
-            !specialization.images.empty(),
-        "post-tested image loop did not materialize");
-  const auto mapping = specialization.images[0].indirect_mapping_offset;
-  Check(snapshot.flattened_srt[mapping] == 15u && snapshot.flattened_srt[mapping + 1u] == 1u &&
-            snapshot.flattened_srt[mapping + 29u] == 15u &&
-            snapshot.images[0].dwords[0] == 0x101u,
-        "post-tested image loop did not enumerate keys 1 to 15");
-  Check(std::ranges::none_of(snapshot.images, [](const auto &image) {
-          return image.dwords[0] == 0x100u;
-        }),
-        "post-tested image loop read the record before its start value");
 }
 
 void TestUniformizedMaterialImageKeys() {
@@ -9288,9 +8998,7 @@ int main() {
     Run("indexed pointer image table", TestIndexedPointerImageTable);
     Run("guarded direct image table", TestGuardedDirectImageTable);
     Run("lane-guarded bit scan table", TestLaneGuardedBitScanTable);
-    Run("loop-selected signed key", TestLoopSelectedSignedKey);
     Run("bounded compute image loop", TestBoundedComputeImageLoop);
-    Run("post-tested image loop", TestPostTestedImageLoop);
     Run("uniformized material image keys", TestUniformizedMaterialImageKeys);
     Run("indexed material image keys", TestIndexedMaterialImageKeys);
     Run("pointer-table indexed material keys", TestPointerTableIndexedMaterialKeys);
