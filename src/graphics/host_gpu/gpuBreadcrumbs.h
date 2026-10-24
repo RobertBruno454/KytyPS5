@@ -29,6 +29,12 @@ void                   End(vk::CommandBuffer buffer, uint32_t sequence);
 void Dump();
 
 } // namespace GpuBreadcrumbs
+
+// KYTY_SKIP_SHADER_HASHES="hash,hash,...": the draws and dispatches of these guest shaders are
+// not recorded. To step past a shader that loses the device (see the breadcrumbs above).
+namespace ShaderSkip {
+[[nodiscard]] bool Requested(uint64_t shader_hash);
+} // namespace ShaderSkip
 } // namespace Libs::Graphics
 
 #endif // EMULATOR_SRC_GRAPHICS_HOST_GPU_GPUBREADCRUMBS_H_

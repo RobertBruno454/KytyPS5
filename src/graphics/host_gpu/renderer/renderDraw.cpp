@@ -1211,7 +1211,12 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	const auto crumb      = GpuBreadcrumbs::Begin(
         vk_buffer, crumb_kind, vertex_stages.back().stage.program->shader_hash,
         state.ps_active ? state.ps_input_info.stage.program->shader_hash : 0);
-	if (mesh_active) {
+	const bool skipped =
+	    ShaderSkip::Requested(vertex_stages.back().stage.program->shader_hash) ||
+	    (state.ps_active && ShaderSkip::Requested(state.ps_input_info.stage.program->shader_hash));
+	if (skipped) {
+		// KYTY_SKIP_SHADER_HASHES: the draw is left out.
+	} else if (mesh_active) {
 		vk_buffer.drawMeshTasksEXT(mesh_groups, draw.instance_count, 1);
 	} else if (args_buffer.first == nullptr) {
 		EmitDrawPrimitives(ucfg, vk_buffer, draw, emit);
