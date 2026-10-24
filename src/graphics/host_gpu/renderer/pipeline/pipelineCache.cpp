@@ -703,7 +703,10 @@ void PipelineCache::GetGraphicsPrograms(const CommandBuffer& command, DrawRender
 	if (mesh_active) {
 		EXIT_NOT_IMPLEMENTED(!m_graphics.mesh_shader_enabled);
 		auto& mesh              = vertex_info[0].mesh;
-		mesh.host_subgroup_size = m_graphics.subgroup_size;
+		// The pipeline requires the wave size where it can (PrepareGraphicsPipeline).
+		const auto required =
+		    m_graphics.GraphicsSubgroupSize(vk::ShaderStageFlagBits::eMeshEXT, mesh.wave_size);
+		mesh.host_subgroup_size = required != 0 ? required : m_graphics.subgroup_size;
 		const auto& limits      = m_graphics.mesh_shader_properties;
 		const auto  logical_threads =
 		    mesh.threads_num[0] * mesh.threads_num[1] * mesh.threads_num[2];
