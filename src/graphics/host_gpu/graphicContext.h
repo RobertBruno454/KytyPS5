@@ -31,6 +31,8 @@ struct GraphicContext {
 	bool                               compute_subgroup_size_control_enabled = false;
 	// subgroupSizeControl is enabled: the device has more than one subgroup size.
 	bool                               subgroup_size_control_enabled         = false;
+	// KYTY_GPU_BREADCRUMBS=1 and VK_AMD_buffer_marker (gpuBreadcrumbs.h).
+	bool                               buffer_marker_enabled                 = false;
 	bool                               sample_rate_shading_enabled           = false;
 	bool                               shader_image_int64_atomics_enabled    = false;
 	// bool fp64_denorm_preserve = false; // Temporarily disabled.

@@ -8,6 +8,7 @@
 #include "common/threads.h"
 #include "common/timer.h"
 #include "graphics/host_gpu/graphicContext.h"
+#include "graphics/host_gpu/gpuBreadcrumbs.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/vulkanCommon.h"
@@ -1116,6 +1117,14 @@ void WindowContext::CreateVulkan() {
 			        nullptr, count, values);
 		    });
 
+		if (GpuBreadcrumbs::Requested()) {
+			if (HasExtension(available_extensions, VK_AMD_BUFFER_MARKER_EXTENSION_NAME)) {
+				device_extensions.push_back(VK_AMD_BUFFER_MARKER_EXTENSION_NAME);
+				graphic_ctx.buffer_marker_enabled = true;
+			} else {
+				LOGF("GPU breadcrumbs: VK_AMD_buffer_marker is not available; breadcrumbs off\n");
+			}
+		}
 		if (HasExtension(available_extensions, VK_EXT_MEMORY_BUDGET_EXTENSION_NAME)) {
 			device_extensions.push_back(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
 			graphic_ctx.memory_budget_ext_enabled = true;
@@ -1153,6 +1162,7 @@ void WindowContext::CreateVulkan() {
 	if (!graphic_ctx.CreateAllocator()) {
 		EXIT("Could not create Vulkan memory allocator");
 	}
+	GpuBreadcrumbs::Init(graphic_ctx);
 
 	render_context = std::make_unique<RenderContext>(graphic_ctx);
 	LibKernel::Memory::InstallGpuResources(render_context.get());
