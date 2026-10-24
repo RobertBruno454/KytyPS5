@@ -20,6 +20,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <bit>
 #include <limits>
 #include <span>
@@ -304,6 +305,31 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 		shader_stages[shader_stage_count++] = {.stage  = vk::ShaderStageFlagBits::eFragment,
 		                                       .module = pixel_program->module,
 		                                       .pName  = "main"};
+	}
+	// One guest wave per host subgroup where the device lets the stage require it (mesh and pixel
+	// shaders on AMD, whose default subgroup is 64); GraphicsSubgroupSize and the mesh's
+	// host_subgroup_size agree (Senaxx, dc67425b2).
+	std::array<vk::PipelineShaderStageRequiredSubgroupSizeCreateInfo, 4> subgroup_sizes {};
+	for (uint32_t index = 0; index < shader_stage_count; index++) {
+		auto&      stage   = shader_stages[index];
+		const bool is_mesh = stage.stage == vk::ShaderStageFlagBits::eMeshEXT;
+		if (!is_mesh && stage.stage != vk::ShaderStageFlagBits::eFragment) {
+			continue;
+		}
+		const auto wave_size =
+		    is_mesh ? vs_input_info.mesh.wave_size : ps_input_info->stage.program->wave_size;
+		const auto required = graphics.GraphicsSubgroupSize(stage.stage, wave_size);
+		if (required != 0) {
+			subgroup_sizes[index].requiredSubgroupSize = required;
+			stage.pNext                                = &subgroup_sizes[index];
+		} else if (wave_size < graphics.subgroup_size) {
+			static std::atomic_bool logged {false};
+			if (!logged.exchange(true)) {
+				LOGF("Vulkan subgroup: wave%u %s shader on a %u-wide host subgroup the device "
+				     "cannot narrow; its lane operations mix two waves\n",
+				     wave_size, is_mesh ? "mesh" : "pixel", graphics.subgroup_size);
+			}
+		}
 	}
 
 	vk::VertexInputAttributeDescription input_attr[ShaderVertexInputInfo::RES_MAX] {};
