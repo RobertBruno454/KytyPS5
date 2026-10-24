@@ -1764,12 +1764,34 @@ void CommandProcessor::DrawIndexAuto(DrawAutoArgs args) {
 	CompleteDraw();
 }
 
+// KYTY_SAFE_RENDER_BLOCK=1: waitUntilSafeForRendering blocks the GPU thread until the buffer is
+// safe, as before upstream a358b847c; by default only this command processor is suspended.
+static bool SafeRenderBlocks() {
+	static const bool enabled = [] {
+		const char* value = std::getenv("KYTY_SAFE_RENDER_BLOCK");
+		return value != nullptr && value[0] != '\0' && value[0] != '0';
+	}();
+	return enabled;
+}
+
 void CommandProcessor::WaitFlipDone(uint32_t video_out_handle, uint32_t display_buffer_index) {
-	// The SDK stalls only this command processor, not the host command lane or other queues.
-	if (!m_renderer.GetVideoOut().IsSafeForRendering(static_cast<int>(video_out_handle),
-	                                                 static_cast<int>(display_buffer_index))) {
-		SuspendPm4();
+	auto&      video_out = m_renderer.GetVideoOut();
+	const auto handle    = static_cast<int>(video_out_handle);
+	const auto index     = static_cast<int>(display_buffer_index);
+	if (video_out.IsSafeForRendering(handle, index)) {
+		return;
 	}
+	// The flip that frees this buffer can be in work recorded but not submitted yet: submit it
+	// before waiting, or the wait outlasts the flip it waits for (this fork records ahead).
+	BufferFlush();
+	if (SafeRenderBlocks()) {
+		while (!video_out.IsSafeForRendering(handle, index)) {
+			std::this_thread::sleep_for(std::chrono::microseconds(200));
+		}
+		return;
+	}
+	// The SDK stalls only this command processor, not the host command lane or other queues.
+	SuspendPm4();
 }
 
 template <typename T>

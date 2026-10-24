@@ -1174,7 +1174,7 @@ void FlipQueue::Complete(uint64_t request_id) {
 	}
 	auto* frame = cancelled->frame;
 	m_cancelled_requests.erase(cancelled);
-	m_done_cond_var.SignalAll();
+	SignalDoneLocked();
 	m_mutex.Unlock();
 	if (frame != nullptr) {
 		m_presenter.Discard(*frame);
