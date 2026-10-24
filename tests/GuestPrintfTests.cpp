@@ -30,15 +30,15 @@ void Check(bool condition, const char* message) {
 }
 
 #ifdef _WIN32
-constexpr auto FileNumber = _fileno;
-constexpr auto Duplicate = _dup;
-constexpr auto Redirect = _dup2;
-constexpr auto Close = _close;
+const auto FileNumber = _fileno;
+const auto Duplicate = _dup;
+const auto Redirect = _dup2;
+const auto Close = _close;
 #else
-constexpr auto FileNumber = fileno;
-constexpr auto Duplicate = dup;
-constexpr auto Redirect = dup2;
-constexpr auto Close = close;
+const auto FileNumber = fileno;
+const auto Duplicate = dup;
+const auto Redirect = dup2;
+const auto Close = close;
 #endif
 
 class StderrCapture {
