@@ -1,6 +1,7 @@
 #include "graphics/host_gpu/renderer/renderDraw.h"
 
 #include "common/assert.h"
+#include "graphics/host_gpu/gpuBreadcrumbs.h"
 #include "common/common.h"
 #include "common/debugCounters.h"
 #include "common/emulatorConfig.h"
@@ -1204,6 +1205,12 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	}
 	auto&         occlusion_queries = m_context.GetOcclusionQueries();
 	const int32_t occlusion_query   = occlusion_queries.Begin(vk_buffer);
+	const auto crumb_kind = mesh_active                    ? GpuBreadcrumbs::Mesh
+	                        : args_buffer.first == nullptr ? GpuBreadcrumbs::Draw
+	                                                       : GpuBreadcrumbs::DrawIndirect;
+	const auto crumb      = GpuBreadcrumbs::Begin(
+        vk_buffer, crumb_kind, vertex_stages.back().stage.program->shader_hash,
+        state.ps_active ? state.ps_input_info.stage.program->shader_hash : 0);
 	if (mesh_active) {
 		vk_buffer.drawMeshTasksEXT(mesh_groups, draw.instance_count, 1);
 	} else if (args_buffer.first == nullptr) {
@@ -1215,6 +1222,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		vk_buffer.drawIndirect(args_buffer.first->Handle(), args_buffer.second,
 		                       emit.indirect.count, emit.indirect.stride);
 	}
+	GpuBreadcrumbs::End(vk_buffer, crumb);
 	occlusion_queries.End(vk_buffer, occlusion_query);
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::Draws);
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::DrawInstances, draw.instance_count);

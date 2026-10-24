@@ -1,4 +1,5 @@
 #include "common/assert.h"
+#include "graphics/host_gpu/gpuBreadcrumbs.h"
 #include "common/common.h"
 #include "common/debugCounters.h"
 #include "common/emulatorConfig.h"
@@ -465,7 +466,10 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 			}
 		}
 	} else {
+		const auto crumb = GpuBreadcrumbs::Begin(vk_buffer, GpuBreadcrumbs::Dispatch,
+		                                         program.shader_hash, 0);
 		vk_buffer.dispatch(thread_group_x, thread_group_y, thread_group_z);
+		GpuBreadcrumbs::End(vk_buffer, crumb);
 	}
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::Dispatches);
 
@@ -539,7 +543,10 @@ void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
 	                          vk::PipelineStageFlagBits::eDrawIndirect, {},
 	                          1, &barrier, 0, nullptr, 0, nullptr);
 	vk_buffer.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline.pipeline);
+	const auto crumb = GpuBreadcrumbs::Begin(vk_buffer, GpuBreadcrumbs::DispatchIndirect,
+	                                         program.shader_hash, 0);
 	vk_buffer.dispatchIndirect(args_buffer->Handle(), args_offset);
+	GpuBreadcrumbs::End(vk_buffer, crumb);
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::Dispatches);
 	ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
 	ResetBindings();
