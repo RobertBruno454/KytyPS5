@@ -40,6 +40,10 @@ static thread_local Pm4Execution*     g_current_execution = nullptr;
 static thread_local bool              g_gpu_thread        = false;
 static thread_local GuestGpu*         g_gpu_state         = nullptr;
 
+// Shader translation runs on this thread and recurses with the shader's structure, so give it the
+// same stack on every host.
+constexpr size_t GpuThreadStackSize = size_t {64} << 20u;
+
 static bool GraphicsRunDebugDumpEnabled() {
 	return Config::GraphicsDebugDumpEnabled() &&
 	       Config::GetPrintfDirection() != Config::LogDirection::Silent;
@@ -50,7 +54,7 @@ GuestGpu::GuestGpu(RenderContext& renderer): m_renderer(renderer) {
 	GraphicsInitJmpTables();
 	m_gfx_cp = std::make_unique<CommandProcessor>(renderer, 0);
 	m_gfx_cp->Reset();
-	m_thread = std::jthread(ThreadRun, this);
+	m_thread = std::make_unique<Common::ThreadWithStack>(ThreadRun, this, GpuThreadStackSize);
 }
 
 GuestGpu::~GuestGpu() {
@@ -68,8 +72,8 @@ void GuestGpu::Shutdown() {
 		m_stopping  = true;
 		m_work_available.SignalAll();
 	}
-	if (m_thread.joinable()) {
-		m_thread.join();
+	if (m_thread) {
+		m_thread->Join();
 	}
 	m_shutdown_complete = true;
 }
