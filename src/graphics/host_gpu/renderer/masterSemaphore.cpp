@@ -3,9 +3,29 @@
 #include "common/assert.h"
 #include "graphics/host_gpu/gpuBreadcrumbs.h"
 #include "common/debugCounters.h"
+#include "common/logging/log.h"
 #include "graphics/host_gpu/graphicContext.h"
 
+#include <cinttypes>
+#include <cstdio>
+
 namespace Libs::Graphics {
+
+namespace {
+
+// A failure here almost always means the Vulkan device was lost (driver TDR, GPU hang recovery,
+// crash) rather than anything KytyPS5 itself did wrong, but EXIT_NOT_IMPLEMENTED only logs the
+// source expression, not the actual vk::Result, so there was previously no way to tell the two
+// apart from a log. Report the real result before the forced exit.
+void ReportSemaphoreFailure(const char* what, vk::Result result, uint64_t tick) {
+	LOGF("MasterSemaphore::%s failed: %s (%d), tick=%" PRIu64 "\n", what,
+	     vk::to_string(result).c_str(), static_cast<int>(result), tick);
+	std::printf("MasterSemaphore::%s failed: %s (%d), tick=%" PRIu64 "\n", what,
+	            vk::to_string(result).c_str(), static_cast<int>(result), tick);
+	std::fflush(stdout);
+}
+
+} // namespace
 
 MasterSemaphore::MasterSemaphore(GraphicContext& graphics): m_graphics(graphics) {
 	vk::SemaphoreTypeCreateInfo type_info {};
@@ -16,6 +36,9 @@ MasterSemaphore::MasterSemaphore(GraphicContext& graphics): m_graphics(graphics)
 	create_info.pNext = &type_info;
 
 	const auto result = m_graphics.device.createSemaphore(&create_info, nullptr, &m_semaphore);
+	if (result != vk::Result::eSuccess) {
+		ReportSemaphoreFailure("create", result, 0);
+	}
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess || m_semaphore == nullptr);
 }
 
@@ -28,8 +51,14 @@ MasterSemaphore::~MasterSemaphore() {
 void MasterSemaphore::Refresh() {
 	uint64_t   counter = 0;
 	const auto result  = m_graphics.device.getSemaphoreCounterValue(m_semaphore, &counter);
-	if (result == vk::Result::eErrorDeviceLost) {
-		GpuBreadcrumbs::Dump();
+	if (result != vk::Result::eSuccess) {
+		if (result == vk::Result::eErrorDeviceLost) {
+			GpuBreadcrumbs::Dump();
+		}
+		// Vulkan does not guarantee *counter was written on failure, so it may still read 0 here
+		// even when the GPU was well past tick 0. Report the last tick we actually confirmed
+		// instead of the possibly-stale/garbage output parameter.
+		ReportSemaphoreFailure("Refresh", result, m_gpu_tick.load(std::memory_order_acquire));
 	}
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
 
@@ -57,8 +86,11 @@ void MasterSemaphore::Wait(uint64_t tick) {
 	Common::DebugCounters::ScopedTimer timer(Common::DebugCounters::Counter::GpuWaits,
 	                                         Common::DebugCounters::Counter::GpuWaitNs);
 	const auto result = m_graphics.device.waitSemaphores(&wait_info, UINT64_MAX);
-	if (result == vk::Result::eErrorDeviceLost) {
-		GpuBreadcrumbs::Dump();
+	if (result != vk::Result::eSuccess) {
+		if (result == vk::Result::eErrorDeviceLost) {
+			GpuBreadcrumbs::Dump();
+		}
+		ReportSemaphoreFailure("Wait", result, tick);
 	}
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
 	Refresh();
