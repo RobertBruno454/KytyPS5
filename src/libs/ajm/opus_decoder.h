@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <vector>
 
 namespace Libs::Audio::Ajm {
 
@@ -70,6 +71,7 @@ public:
 		}
 		m_total_decoded_samples = 0;
 		m_frames_per_packet     = 0;
+		m_pcm_buffer.clear();
 	}
 
 	AjmDecodeResult Decode(const void* input, size_t input_size, void* output, size_t output_size,
@@ -77,6 +79,13 @@ public:
 		auto result = MakeResult();
 		if (m_context == nullptr) {
 			result.result = AJM_RESULT_NOT_INITIALIZED;
+			return result;
+		}
+		WritePcm(output, output_size, gapless, &result);
+		if (!m_pcm_buffer.empty()) {
+			if (result.output_written == 0) {
+				result.result = AJM_RESULT_NOT_ENOUGH_ROOM;
+			}
 			return result;
 		}
 		if (input == nullptr || input_size == 0) {
@@ -124,9 +133,12 @@ public:
 			                       : samples - skip;
 			const auto sample_bytes = m_channels * AjmBytesPerSample(m_sample_encoding);
 			const auto output_bytes = write * sample_bytes;
-			if (output_bytes > output_size - result.output_written ||
-			    (output_bytes != 0 && output == nullptr)) {
-				result.result = AJM_RESULT_NOT_ENOUGH_ROOM;
+			// Room for one sample is enough: the rest of the packet waits in m_pcm_buffer.
+			if (output_bytes != 0 &&
+			    (output == nullptr || output_size - result.output_written < sample_bytes)) {
+				if (result.output_written == 0) {
+					result.result = AJM_RESULT_NOT_ENOUGH_ROOM;
+				}
 				break;
 			}
 
@@ -141,26 +153,20 @@ public:
 				result.internal_result = 0x1043;
 				break;
 			}
-			if (output_bytes != 0) {
-				std::memcpy(static_cast<uint8_t*>(output) + result.output_written,
-				            frame->data[0] + skip * sample_bytes, output_bytes);
-			}
+			const auto* pcm = frame->data[0] + skip * sample_bytes;
+			m_pcm_buffer.assign(pcm, pcm + output_bytes);
 			av_frame_free(&frame);
 			if (gapless != nullptr) {
 				gapless->current.skip_samples -= static_cast<uint16_t>(skip);
 				gapless->current.skipped_samples = static_cast<uint16_t>(
 				    std::min<uint32_t>(std::numeric_limits<uint16_t>::max(),
 				                       gapless->current.skipped_samples + samples - write));
-				if (gapless->HasSampleLimit()) {
-					gapless->current.total_samples -= write;
-				}
 			}
 			result.input_consumed += packet_size + 2;
-			result.output_written += output_bytes;
 			result.frames += frames;
 			m_frames_per_packet = frames;
-			m_total_decoded_samples += write;
-			if (!multiple_frames) {
+			WritePcm(output, output_size, gapless, &result);
+			if (!m_pcm_buffer.empty() || !multiple_frames) {
 				break;
 			}
 		}
@@ -181,6 +187,29 @@ public:
 	}
 
 private:
+	// Samples count as decoded, and against the gapless sample limit, when they are written.
+	void WritePcm(void* output, size_t output_size, AjmGaplessState* gapless,
+	              AjmDecodeResult* result) {
+		if (output == nullptr || m_pcm_buffer.empty()) {
+			return;
+		}
+		const auto sample_bytes = m_channels * AjmBytesPerSample(m_sample_encoding);
+		auto       bytes = std::min(m_pcm_buffer.size(), output_size - result->output_written);
+		bytes -= bytes % sample_bytes;
+		std::memcpy(static_cast<uint8_t*>(output) + result->output_written, m_pcm_buffer.data(),
+		            bytes);
+		m_pcm_buffer.erase(m_pcm_buffer.begin(),
+		                   m_pcm_buffer.begin() + static_cast<std::ptrdiff_t>(bytes));
+		result->output_written += bytes;
+
+		const auto samples = static_cast<uint32_t>(bytes / sample_bytes);
+		if (gapless != nullptr && gapless->HasSampleLimit()) {
+			gapless->current.total_samples -= std::min(gapless->current.total_samples, samples);
+		}
+		m_total_decoded_samples += samples;
+		result->total_decoded_samples = m_total_decoded_samples;
+	}
+
 	AVFrame* DecodePacket(const uint8_t* data, uint32_t size, AjmDecodeResult* result) {
 		AVPacket* packet = av_packet_alloc();
 		AVFrame*  frame  = av_frame_alloc();
@@ -208,9 +237,10 @@ private:
 		return converted;
 	}
 
-	AVCodecContext* m_context = nullptr;
-	const uint32_t  m_max_channels;
-	uint32_t        m_frames_per_packet = 0;
+	AVCodecContext*      m_context = nullptr;
+	const uint32_t       m_max_channels;
+	uint32_t             m_frames_per_packet = 0;
+	std::vector<uint8_t> m_pcm_buffer;
 };
 
 }
