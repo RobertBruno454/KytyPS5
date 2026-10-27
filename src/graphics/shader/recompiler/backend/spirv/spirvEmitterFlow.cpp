@@ -717,8 +717,11 @@ void EmitBarrier(EmitterState& state) {
 	                  ? spv::MemorySemanticsUniformMemoryMask
 	                  : spv::MemorySemanticsWorkgroupMemoryMask;
 	// Shaders read other waves' buffer and image stores with plain loads right after S_BARRIER.
+	// Stores through raw addresses (physical storage buffers) count too: UFC 6 (PPSA23566) builds
+	// per-pixel lists for its hair in memory and walks them after the barrier, and a wave that
+	// reads an old next pointer walks forever (GPU hang while a fight loads; PR #1894).
 	const auto written = [](const auto& resource) { return resource.written; };
-	if (std::ranges::any_of(state.program.info.buffers, written) ||
+	if (state.program.has_address_writes || std::ranges::any_of(state.program.info.buffers, written) ||
 	    std::ranges::any_of(state.program.info.images, written)) {
 		memory = memory | spv::MemorySemanticsUniformMemoryMask |
 		         spv::MemorySemanticsImageMemoryMask;
